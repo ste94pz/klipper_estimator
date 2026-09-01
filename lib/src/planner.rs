@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use crate::arcs::ArcState;
@@ -18,6 +18,7 @@ pub struct Planner {
     pub kind_tracker: KindTracker,
     pub firmware_retraction: Option<FirmwareRetractionState>,
     pub arc_state: ArcState,
+    diagnostics: Vec<PlannerDiagnostic>,
 }
 
 impl Planner {
@@ -32,6 +33,7 @@ impl Planner {
             kind_tracker: KindTracker::new(),
             firmware_retraction,
             arc_state: ArcState::default(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -39,11 +41,25 @@ impl Planner {
     /// open move sequence.
     /// Returns the number of planning operations the command resulted in
     pub fn process_cmd(&mut self, cmd: &GCodeCommand) -> usize {
+        if Self::is_unsupported_traditional_state_command(cmd) {
+            self.diagnostics.push(PlannerDiagnostic {
+                code: PlannerDiagnosticCode::UnsupportedStateCommand,
+                command: cmd
+                    .op
+                    .to_string()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .into(),
+                message: "parsed state-changing command is not modeled; estimate is a lower bound"
+                    .into(),
+            });
+        }
         if let Some(m) = Self::is_dwell(cmd, &mut self.kind_tracker) {
             self.operations.add_delay(m);
         } else if let GCodeOperation::Move { x, y, z, e, f } = &cmd.op {
             if let Some(v) = f {
-                self.toolhead_state.set_speed(v / 60.0);
+                self.toolhead_state.set_gcode_speed(*v);
             }
 
             let move_kind = self.kind_tracker.kind_from_comment(&cmd.comment);
@@ -69,6 +85,8 @@ impl Planner {
                     if let Some(fr) = self.firmware_retraction.as_mut() {
                         return fr.retract(kt, m, seq);
                     }
+                    self.diagnostics
+                        .push(PlannerDiagnostic::unsupported_state_command("g10"));
                 }
                 ('G', 11) => {
                     let kt = &mut self.kind_tracker;
@@ -77,6 +95,8 @@ impl Planner {
                     if let Some(fr) = self.firmware_retraction.as_mut() {
                         return fr.unretract(kt, m, seq);
                     }
+                    self.diagnostics
+                        .push(PlannerDiagnostic::unsupported_state_command("g11"));
                 }
                 ('G', v @ 2 | v @ 3) => {
                     let move_kind = self.kind_tracker.kind_from_comment(&cmd.comment);
@@ -104,21 +124,25 @@ impl Planner {
                     self.arc_state.set_plane(crate::arcs::Plane::YZ);
                 }
                 ('G', 92) => {
-                    if let Some(v) = params.get_number::<f64>('X') {
-                        self.toolhead_state.position.x = v;
-                    }
-                    if let Some(v) = params.get_number::<f64>('Y') {
-                        self.toolhead_state.position.y = v;
-                    }
-                    if let Some(v) = params.get_number::<f64>('Z') {
-                        self.toolhead_state.position.z = v;
-                    }
-                    if let Some(v) = params.get_number::<f64>('E') {
-                        self.toolhead_state.position.w = v;
-                    }
+                    self.toolhead_state.set_gcode_position([
+                        params.get_number::<f64>('X'),
+                        params.get_number::<f64>('Y'),
+                        params.get_number::<f64>('Z'),
+                        params.get_number::<f64>('E'),
+                    ]);
                 }
+                ('G', 90) => self.toolhead_state.position_modes[..3].fill(PositionMode::Absolute),
+                ('G', 91) => self.toolhead_state.position_modes[..3].fill(PositionMode::Relative),
                 ('M', 82) => self.toolhead_state.position_modes[3] = PositionMode::Absolute,
                 ('M', 83) => self.toolhead_state.position_modes[3] = PositionMode::Relative,
+                ('M', 220) => {
+                    self.toolhead_state
+                        .set_speed_factor(params.get_number::<f64>('S').unwrap_or(100.0));
+                }
+                ('M', 221) => {
+                    self.toolhead_state
+                        .set_extrude_factor(params.get_number::<f64>('S').unwrap_or(100.0));
+                }
                 ('M', 204) => {
                     let s = params.get_number::<f64>('S');
                     let p = params.get_number::<f64>('P');
@@ -156,7 +180,52 @@ impl Planner {
                         fr.set_options(m, params);
                     }
                 }
+                "set_gcode_offset" => {
+                    let mut offset = [None; 4];
+                    let mut adjustment = [None; 4];
+                    for (axis, name) in ["x", "y", "z", "e"].iter().enumerate() {
+                        offset[axis] = params.get_number::<f64>(name);
+                        adjustment[axis] = params.get_number::<f64>(&format!("{name}_adjust"));
+                    }
+                    let move_requested = params.get_number::<i64>("move").unwrap_or(0) != 0;
+                    let move_speed = params.get_number::<f64>("move_speed");
+                    if let Some(m) = self.toolhead_state.set_gcode_offset(
+                        offset,
+                        adjustment,
+                        move_requested,
+                        move_speed,
+                    ) {
+                        self.operations.add_move(m, &self.toolhead_state);
+                        return 1;
+                    }
+                }
+                "save_gcode_state" => {
+                    let name = params.get_string("name").unwrap_or("default");
+                    self.toolhead_state.save_gcode_state(name);
+                }
+                "restore_gcode_state" => {
+                    let name = params.get_string("name").unwrap_or("default");
+                    let move_requested = params.get_number::<i64>("move").unwrap_or(0) != 0;
+                    let move_speed = params.get_number::<f64>("move_speed");
+                    match self
+                        .toolhead_state
+                        .restore_gcode_state(name, move_requested, move_speed)
+                    {
+                        Ok(Some(m)) => {
+                            self.operations.add_move(m, &self.toolhead_state);
+                            return 1;
+                        }
+                        Ok(None) => {}
+                        Err(()) => self
+                            .diagnostics
+                            .push(PlannerDiagnostic::unknown_saved_state(name)),
+                    }
+                }
                 _ => {}
+            }
+            if Self::is_unsupported_state_command(command) {
+                self.diagnostics
+                    .push(PlannerDiagnostic::unsupported_state_command(command));
             }
             self.operations.add_fill();
         } else if let (true, Some(comment)) = (cmd.op.is_nop(), cmd.comment.as_ref()) {
@@ -187,6 +256,40 @@ impl Planner {
     /// Performs final processing on the final sequence, if one is active.
     pub fn finalize(&mut self) {
         self.operations.flush();
+    }
+
+    pub fn diagnostics(&self) -> &[PlannerDiagnostic] {
+        &self.diagnostics
+    }
+
+    fn is_unsupported_state_command(command: &str) -> bool {
+        matches!(
+            command,
+            "activate_extruder"
+                | "bed_mesh_clear"
+                | "bed_mesh_profile"
+                | "restore_dual_carriage_state"
+                | "save_dual_carriage_state"
+                | "set_dual_carriage"
+                | "set_kinematic_position"
+                | "set_skew"
+                | "skew_profile"
+        )
+    }
+
+    fn is_unsupported_traditional_state_command(cmd: &GCodeCommand) -> bool {
+        matches!(
+            cmd.op,
+            GCodeOperation::Traditional {
+                letter: 'G',
+                code: 20 | 28,
+                ..
+            } | GCodeOperation::Traditional {
+                letter: 'M',
+                code: 600,
+                ..
+            }
+        )
     }
 
     fn is_dwell(cmd: &GCodeCommand, kind_tracker: &mut KindTracker) -> Option<Delay> {
@@ -276,6 +379,39 @@ pub enum PlanningOperation {
     Delay(Delay),
     Move(PlanningMove),
     Fill,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannerDiagnosticCode {
+    UnknownSavedGcodeState,
+    UnsupportedStateCommand,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct PlannerDiagnostic {
+    pub code: PlannerDiagnosticCode,
+    pub command: String,
+    pub message: String,
+}
+
+impl PlannerDiagnostic {
+    fn unknown_saved_state(name: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnknownSavedGcodeState,
+            command: "RESTORE_GCODE_STATE".into(),
+            message: format!("unknown saved G-code state: {name}"),
+        }
+    }
+
+    fn unsupported_state_command(command: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnsupportedStateCommand,
+            command: command.to_ascii_uppercase(),
+            message: "parsed state-changing command is not modeled; estimate is a lower bound"
+                .into(),
+        }
+    }
 }
 
 impl PlanningOperation {
@@ -746,6 +882,8 @@ pub struct PrinterLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_per_arc_segment: Option<f64>,
     pub move_checkers: Vec<MoveChecker>,
+    pub initial_coordinate_mode: PositionMode,
+    pub initial_extrusion_mode: PositionMode,
 }
 
 impl Default for PrinterLimits {
@@ -762,6 +900,10 @@ impl Default for PrinterLimits {
             move_checkers: vec![],
             firmware_retraction: None,
             mm_per_arc_segment: None,
+            initial_coordinate_mode: PositionMode::Absolute,
+            // Compatibility default: slicer start macros commonly contain the M83 that the
+            // estimator cannot see. Klipper itself starts in absolute extrusion mode.
+            initial_extrusion_mode: PositionMode::Relative,
         }
     }
 }
@@ -822,7 +964,8 @@ impl PrinterLimits {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PositionMode {
     #[default]
     Absolute,
@@ -831,24 +974,49 @@ pub enum PositionMode {
 
 #[derive(Debug)]
 pub struct ToolheadState {
+    /// Physical position submitted to the motion planner (Klipper `last_position`).
     pub position: Vec4,
+    /// Origin used to transform absolute G-code coordinates into physical coordinates.
+    pub base_position: Vec4,
+    pub homing_position: Vec4,
     pub position_modes: [PositionMode; 4],
     pub limits: PrinterLimits,
 
     pub velocity: f64,
+    pub speed_factor: f64,
+    pub extrude_factor: f64,
+    saved_states: HashMap<String, SavedGcodeState>,
+}
+
+#[derive(Debug, Clone)]
+struct SavedGcodeState {
+    position: Vec4,
+    base_position: Vec4,
+    homing_position: Vec4,
+    position_modes: [PositionMode; 4],
+    velocity: f64,
+    speed_factor: f64,
+    extrude_factor: f64,
 }
 
 impl ToolheadState {
     fn from_limits(limits: PrinterLimits) -> Self {
+        let coordinate_mode = limits.initial_coordinate_mode;
+        let extrusion_mode = limits.initial_extrusion_mode;
         ToolheadState {
             position: Vec4::ZERO,
+            base_position: Vec4::ZERO,
+            homing_position: Vec4::ZERO,
             position_modes: [
-                PositionMode::Absolute,
-                PositionMode::Absolute,
-                PositionMode::Absolute,
-                PositionMode::Relative,
+                coordinate_mode,
+                coordinate_mode,
+                coordinate_mode,
+                extrusion_mode,
             ],
             velocity: limits.max_velocity,
+            speed_factor: 1.0 / 60.0,
+            extrude_factor: 1.0,
+            saved_states: HashMap::new(),
             limits,
         }
     }
@@ -858,19 +1026,19 @@ impl ToolheadState {
 
         for (axis, v) in axes.iter().enumerate() {
             if let Some(v) = v {
-                new_pos.as_mut()[axis] =
-                    Self::new_element(*v, new_pos.as_mut()[axis], self.position_modes[axis]);
+                let value = if axis == 3 {
+                    *v * self.extrude_factor
+                } else {
+                    *v
+                };
+                new_pos.as_mut()[axis] = match self.position_modes[axis] {
+                    PositionMode::Relative => new_pos.as_ref()[axis] + value,
+                    PositionMode::Absolute => self.base_position.as_ref()[axis] + value,
+                };
             }
         }
 
-        let mut pm = PlanningMove::new(self.position, new_pos, self);
-
-        for c in self.limits.move_checkers.iter() {
-            c.check(&mut pm);
-        }
-
-        self.position = new_pos;
-        pm
+        self.perform_physical_move(new_pos, None)
     }
 
     pub fn perform_relative_move(
@@ -886,18 +1054,143 @@ impl ToolheadState {
         pm
     }
 
-    pub(crate) fn new_element(v: f64, old: f64, mode: PositionMode) -> f64 {
-        match mode {
-            PositionMode::Relative => old + v,
-            PositionMode::Absolute => v,
-        }
-    }
-
     pub fn set_speed(&mut self, v: f64) {
         if v <= 0.0 {
             panic!("Requested toolhead velocity {} <= 0", v);
         }
         self.velocity = v
+    }
+
+    pub fn set_gcode_speed(&mut self, feedrate: f64) {
+        self.set_speed(feedrate * self.speed_factor);
+    }
+
+    pub fn gcode_position(&self) -> Vec4 {
+        let mut position = self.position - self.base_position;
+        position.w /= self.extrude_factor;
+        position
+    }
+
+    fn set_gcode_position(&mut self, axes: [Option<f64>; 4]) {
+        if axes.iter().all(Option::is_none) {
+            self.base_position = self.position;
+            return;
+        }
+        for (axis, value) in axes.iter().enumerate() {
+            if let Some(value) = value {
+                let value = if axis == 3 {
+                    value * self.extrude_factor
+                } else {
+                    *value
+                };
+                self.base_position.as_mut()[axis] = self.position.as_ref()[axis] - value;
+            }
+        }
+    }
+
+    fn set_speed_factor(&mut self, percent: f64) {
+        if percent <= 0.0 {
+            return;
+        }
+        let gcode_speed = self.velocity / self.speed_factor;
+        self.speed_factor = percent / (60.0 * 100.0);
+        self.velocity = gcode_speed * self.speed_factor;
+    }
+
+    fn set_extrude_factor(&mut self, percent: f64) {
+        if percent <= 0.0 {
+            return;
+        }
+        let new_factor = percent / 100.0;
+        let e_value = (self.position.w - self.base_position.w) / self.extrude_factor;
+        self.base_position.w = self.position.w - e_value * new_factor;
+        self.extrude_factor = new_factor;
+    }
+
+    fn save_gcode_state(&mut self, name: &str) {
+        self.saved_states.insert(
+            name.into(),
+            SavedGcodeState {
+                position: self.position,
+                base_position: self.base_position,
+                homing_position: self.homing_position,
+                position_modes: self.position_modes,
+                velocity: self.velocity,
+                speed_factor: self.speed_factor,
+                extrude_factor: self.extrude_factor,
+            },
+        );
+    }
+
+    fn restore_gcode_state(
+        &mut self,
+        name: &str,
+        move_requested: bool,
+        move_speed: Option<f64>,
+    ) -> Result<Option<PlanningMove>, ()> {
+        let state = self.saved_states.get(name).cloned().ok_or(())?;
+        let e_diff = self.position.w - state.position.w;
+        self.position_modes = state.position_modes;
+        self.base_position = state.base_position;
+        self.base_position.w += e_diff;
+        self.homing_position = state.homing_position;
+        self.velocity = state.velocity;
+        self.speed_factor = state.speed_factor;
+        self.extrude_factor = state.extrude_factor;
+
+        if !move_requested {
+            return Ok(None);
+        }
+        let target = Vec4::new(
+            state.position.x,
+            state.position.y,
+            state.position.z,
+            self.position.w,
+        );
+        Ok(Some(self.perform_physical_move(target, move_speed)))
+    }
+
+    fn set_gcode_offset(
+        &mut self,
+        offsets: [Option<f64>; 4],
+        adjustments: [Option<f64>; 4],
+        move_requested: bool,
+        move_speed: Option<f64>,
+    ) -> Option<PlanningMove> {
+        let mut move_delta = Vec4::ZERO;
+        for axis in 0..4 {
+            let offset = offsets[axis].or_else(|| {
+                adjustments[axis].map(|adjustment| self.homing_position.as_ref()[axis] + adjustment)
+            });
+            if let Some(offset) = offset {
+                let delta = offset - self.homing_position.as_ref()[axis];
+                move_delta.as_mut()[axis] = delta;
+                self.base_position.as_mut()[axis] += delta;
+                self.homing_position.as_mut()[axis] = offset;
+            }
+        }
+        if !move_requested {
+            return None;
+        }
+        Some(self.perform_physical_move(self.position + move_delta, move_speed))
+    }
+
+    pub(crate) fn perform_physical_move(
+        &mut self,
+        new_position: Vec4,
+        requested_velocity: Option<f64>,
+    ) -> PlanningMove {
+        let previous_velocity = self.velocity;
+        if let Some(velocity) = requested_velocity {
+            self.set_speed(velocity);
+        }
+        let mut planning_move = PlanningMove::new(self.position, new_position, self);
+        for checker in &self.limits.move_checkers {
+            checker.check(&mut planning_move);
+        }
+        self.position = new_position;
+        self.velocity = previous_velocity;
+        planning_move
     }
 
     fn extruder_junction_speed_v2(&self, cur_move: &PlanningMove, prev_move: &PlanningMove) -> f64 {

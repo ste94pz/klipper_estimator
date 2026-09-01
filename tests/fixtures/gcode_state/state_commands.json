@@ -1,0 +1,25 @@
+{
+  "name": "coordinate overrides saved state and offsets",
+  "initial_coordinate_mode": "absolute",
+  "initial_extrusion_mode": "relative",
+  "limits": {
+    "max_velocity": 100.0,
+    "max_acceleration": 100.0,
+    "minimum_cruise_ratio": 0.5,
+    "square_corner_velocity": 5.0,
+    "instant_corner_velocity": 1000000000.0
+  },
+  "commands": [
+    "G92 X2 E1",
+    "M220 S75",
+    "M221 S125",
+    "SAVE_GCODE_STATE NAME=sample",
+    "G91",
+    "M83",
+    "SET_GCODE_OFFSET Z=0.5",
+    "RESTORE_GCODE_STATE NAME=sample",
+    "G90",
+    "M82",
+    "G1 X7 E3 F900"
+  ]
+}

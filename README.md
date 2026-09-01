@@ -81,6 +81,20 @@ well. This difference exists because `klipper_estimator` can't see inside
 macros. Most users use relative extrusion, and put the M83 command in their
 print start macro, making it invisible to `klipper_estimator`.
 
+The initial modes are explicit JSON5 configuration fields. Existing
+configurations keep the compatibility defaults shown here:
+
+```json5
+{
+  initial_coordinate_mode: "absolute",
+  initial_extrusion_mode: "relative",
+}
+```
+
+Set `initial_extrusion_mode` to `"absolute"` to use Klipper's startup default,
+or keep the mode explicit in exported G-code with `M82`/`M83`. G-code may switch
+XYZ independently with `G90`/`G91`.
+
 If you wish to use _absolute_ extrusion, you must ensure that an `M82` command
 is inserted in your slicer start gcode. E.g.:
 
@@ -88,6 +102,20 @@ is inserted in your slicer start gcode. E.g.:
 PRINT_START
 M82
 ```
+
+#### G-code coordinate state
+
+The estimator models Klipper's physical position separately from its G-code
+origin. It supports `G90`, `G91`, `G92`, `M82`, `M83`, `M220`, `M221`, named
+`SAVE_GCODE_STATE`/`RESTORE_GCODE_STATE`, and `SET_GCODE_OFFSET`. The `MOVE` and
+`MOVE_SPEED` parameters on restore and offset commands generate planned moves
+with the same coordinate-state behavior as Klipper.
+
+Known state-changing commands that are parsed but not modeled produce a
+structured diagnostic. Human output prints the diagnostic before the estimate;
+JSON output includes it in the top-level `diagnostics` array. Post-processing
+and `dump-moves` report the same condition on stderr. Such an estimate remains
+a lower bound rather than silently assuming that the command had no effect.
 
 ### `estimate` mode
 

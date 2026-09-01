@@ -4,7 +4,7 @@ use std::io::BufReader;
 
 use lib_klipper::gcode::GCodeReader;
 use lib_klipper::glam::{DVec2, Vec4Swizzles};
-use lib_klipper::planner::{Delay, Planner, PlanningMove, PlanningOperation};
+use lib_klipper::planner::{Delay, Planner, PlannerDiagnostic, PlanningMove, PlanningOperation};
 
 use clap::Parser;
 use ordered_float::NotNan;
@@ -58,6 +58,7 @@ pub struct EstimateCmd {
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 struct EstimationState {
     sequences: Vec<EstimationSequence>,
+    diagnostics: Vec<PlannerDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
@@ -218,9 +219,17 @@ impl EstimateCmd {
         for o in planner.iter().collect::<Vec<_>>() {
             state.add(&planner, &o);
         }
+        state.diagnostics = planner.diagnostics().to_vec();
 
         match self.format {
             OutputFormat::Human => {
+                if !state.diagnostics.is_empty() {
+                    println!("Diagnostics:");
+                    for diagnostic in &state.diagnostics {
+                        println!("  {}: {}", diagnostic.command, diagnostic.message);
+                    }
+                    println!();
+                }
                 println!("Sequences:");
 
                 let cross_section = std::f64::consts::PI * (1.75f64 / 2.0).powf(2.0);
@@ -476,5 +485,8 @@ impl DumpMovesCmd {
         }
         planner.finalize();
         state.flush(&mut planner);
+        for diagnostic in planner.diagnostics() {
+            eprintln!("{}: {}", diagnostic.command, diagnostic.message);
+        }
     }
 }

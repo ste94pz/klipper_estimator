@@ -16,3 +16,10 @@ KLIPPER_PATH="$klipper_path" cargo test \
     --test accuracy_baseline \
     pinned_klipper_differential_baseline \
     -- --exact
+
+KLIPPER_PATH="$klipper_path" cargo test \
+    --manifest-path "$repository_root/Cargo.toml" \
+    -p lib_klipper \
+    --test gcode_state_differential \
+    command_sequence_matches_pinned_klipper_gcode_move \
+    -- --exact

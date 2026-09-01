@@ -37,21 +37,15 @@ impl ArcState {
 
         toolhead_state.set_speed(args.velocity);
 
-        let old_pos_mode = toolhead_state.position_modes;
-        toolhead_state.position_modes = [PositionMode::Absolute; 4];
         for segment in arc {
             e_base += e_per_move;
-            let coord = [
-                Some(segment.x),
-                Some(segment.y),
-                Some(segment.z),
-                Some(e_base),
-            ];
-            let mut pm = toolhead_state.perform_move(coord);
+            let mut pm = toolhead_state.perform_physical_move(
+                glam::DVec4::new(segment.x, segment.y, segment.z, e_base),
+                None,
+            );
             pm.kind = move_kind;
             op_sequence.add_move(pm, toolhead_state);
         }
-        toolhead_state.position_modes = old_pos_mode;
 
         segments
     }
@@ -64,11 +58,15 @@ impl ArcState {
         let mm_per_arc_segment = toolhead_state.limits.mm_per_arc_segment?;
 
         let map_coord = |c: f64, axis: usize| {
-            ToolheadState::new_element(
-                c,
-                toolhead_state.position.as_ref()[axis],
-                toolhead_state.position_modes[axis],
-            )
+            let value = if axis == 3 {
+                c * toolhead_state.extrude_factor
+            } else {
+                c
+            };
+            match toolhead_state.position_modes[axis] {
+                PositionMode::Relative => toolhead_state.position.as_ref()[axis] + value,
+                PositionMode::Absolute => toolhead_state.base_position.as_ref()[axis] + value,
+            }
         };
 
         let (axes, offset) = match self.plane {
@@ -114,7 +112,7 @@ impl ArcState {
             e: params.get_number::<f64>('E').map(|c| map_coord(c, 3)),
             velocity: params
                 .get_number::<f64>('F')
-                .map_or(toolhead_state.velocity, |v| v / 60.0),
+                .map_or(toolhead_state.velocity, |v| v * toolhead_state.speed_factor),
             axes,
             offset,
             mm_per_arc_segment,

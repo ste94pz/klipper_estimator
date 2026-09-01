@@ -6,7 +6,7 @@
 
 Use printer limits that match the machine which will run the file. The preferred source is Moonraker because Klipper has already resolved configuration defaults and included files. A dumped JSON5 configuration is useful for repeatable or offline estimates.
 
-G-code may change velocity, acceleration, coordinate mode, or extrusion mode during a print. Unsupported state-changing commands and macros can reduce accuracy even when the initial printer limits are correct.
+G-code may change velocity, acceleration, coordinate mode, or extrusion mode during a print. The estimator applies Klipper-compatible coordinate origins, feed and extrusion overrides, saved G-code state, and G-code offsets. Unsupported state-changing commands and macros can reduce accuracy even when the initial printer limits are correct; recognized unsupported state changes are returned as structured diagnostics instead of being silently assigned zero effect.
 
 ## What is not generally predictable from the file
 
@@ -21,5 +21,11 @@ The reported minimal time should therefore not be interpreted as a guaranteed co
 3. Keep dynamic velocity-limit commands in the exported file rather than only in an external macro.
 4. Add measured constant macro overhead with `ESTIMATOR_ADD_TIME`.
 5. Compare estimates with completed, unpaused prints and investigate errors that scale with move count or geometry separately from constant startup overhead.
+
+The configuration fields `initial_coordinate_mode` and
+`initial_extrusion_mode` select the state before the first file command. Their
+compatibility defaults are `absolute` and `relative`, respectively; Klipper's
+native startup extrusion mode is `absolute`. Choose `absolute` explicitly when
+the file is analyzed without an invisible start macro that issues `M83`.
 
 When reporting an accuracy problem, include the G-code, dumped estimator configuration, estimator version, actual print duration, and whether the print contained pauses or runtime overrides. Remove credentials and private macro contents before sharing files.

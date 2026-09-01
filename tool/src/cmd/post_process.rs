@@ -374,6 +374,9 @@ impl EstimateRunner {
 
         self.planner.finalize();
         self.flush();
+        for diagnostic in self.planner.diagnostics() {
+            eprintln!("{}: {}", diagnostic.command, diagnostic.message);
+        }
     }
 
     fn flush(&mut self) {

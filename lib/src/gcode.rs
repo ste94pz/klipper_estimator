@@ -323,7 +323,13 @@ mod parser {
         let (s, _) = skip_space(s)?;
         let (s, params) = separated_list0(space1, traditional_param)(s)?;
         let (s, comment) = opt(comment)(s)?;
-        Ok((s, (map_traditional(letter, code, params), comment)))
+        Ok((
+            s,
+            (
+                map_traditional(letter.to_ascii_uppercase(), code, params),
+                comment,
+            ),
+        ))
     }
 
     fn traditional_param(s: &str) -> IResult<&str, (char, &str)> {
@@ -459,5 +465,17 @@ mod tests {
             }
             operation => panic!("unexpected operation: {:?}", operation),
         }
+    }
+
+    #[test]
+    fn traditional_commands_are_case_insensitive() {
+        assert_eq!(
+            parse_gcode("g91").unwrap().op,
+            GCodeOperation::Traditional {
+                letter: 'G',
+                code: 91,
+                params: GCodeTraditionalParams::from_vec(vec![]),
+            }
+        );
     }
 }
