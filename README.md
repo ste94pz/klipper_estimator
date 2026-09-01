@@ -1,5 +1,11 @@
 # Klipper print time estimator
 
+This repository is a maintained fork of the now-archived
+[Annex Engineering project](https://github.com/Annex-Engineering/klipper_estimator).
+The original estimator was created by Lasse Dalegaard and improved by many
+contributors. Their work made this continuation possible, and is gratefully
+acknowledged.
+
 `klipper_estimator` is a tool for determining the time a print will take using
 the Klipper firmware. Currently it provides the following modes:
 
@@ -121,6 +127,9 @@ count as zero seconds, as well heat up times, homing, etc. Therefore the time
 output should be considered a "minimal time", assuming these extra factors take
 no time.
 
+See [Estimate scope and accuracy](doc/accuracy.md) for practical guidance on
+configuration, repeatability, and interpreting the result.
+
 ### `post-process` mode
 
 In `post-process` mode `klipper_estimator` directly modifies the filename passed
@@ -214,7 +223,7 @@ compile the tool. Assuming a Rust toolchain is installed, along with git, one
 can build `klipper_estimator` by running:
 
 ```
-$ git clone https://github.com/dalegaard/klipper_estimator.git
+$ git clone https://github.com/ste94pz/klipper_estimator.git
 $ cd klipper_estimator
 $ cargo build --release
 // Resulting binary will be at `target/release/klipper_estimator`(.exe on Windows)

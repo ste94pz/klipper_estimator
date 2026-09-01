@@ -1,1 +1,6 @@
 /target
+
+# Local development material (not part of release sources)
+/AGENTS.md
+/.agents/
+/klipper
