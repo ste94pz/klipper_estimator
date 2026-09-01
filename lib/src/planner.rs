@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::f64::EPSILON;
 use std::time::Duration;
 
 use crate::arcs::ArcState;
@@ -160,9 +159,7 @@ impl Planner {
                 _ => {}
             }
             self.operations.add_fill();
-        } else if cmd.op.is_nop() && cmd.comment.is_some() {
-            let comment = cmd.comment.as_ref().unwrap(); // Same, we checked for is_some
-
+        } else if let (true, Some(comment)) = (cmd.op.is_nop(), cmd.comment.as_ref()) {
             if let Some(comment) = comment.strip_prefix("TYPE:") {
                 // IdeaMaker only gives us `TYPE:`s
                 let kind = self.kind_tracker.get_kind(comment);
@@ -246,7 +243,7 @@ impl Planner {
         self.operations.next_operation()
     }
 
-    pub fn iter(&mut self) -> PlanningOperationIter {
+    pub fn iter(&mut self) -> PlanningOperationIter<'_> {
         PlanningOperationIter { planner: self }
     }
 
@@ -440,7 +437,7 @@ impl PlanningMove {
     }
 
     pub fn is_extrude_move(&self) -> bool {
-        (self.end.w - self.start.w).abs() >= EPSILON
+        (self.end.w - self.start.w).abs() >= f64::EPSILON
     }
 
     pub fn is_extrude_only_move(&self) -> bool {
@@ -448,7 +445,7 @@ impl PlanningMove {
     }
 
     pub fn is_zero_distance(&self) -> bool {
-        self.distance.abs() < EPSILON
+        self.distance.abs() < f64::EPSILON
     }
 
     pub fn line_width(&self, filament_radius: f64, layer_height: f64) -> Option<f64> {

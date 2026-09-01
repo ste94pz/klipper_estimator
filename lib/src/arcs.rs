@@ -214,6 +214,9 @@ pub enum Plane {
     YZ,
 }
 
+// Keep the manual implementation compatible with the documented Rust 1.58 MSRV;
+// `#[default]` on enum variants was stabilized later.
+#[allow(clippy::derivable_impls)]
 impl Default for Plane {
     fn default() -> Self {
         Self::XY

@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::f64::EPSILON;
 use std::fs::File;
 use std::io::BufReader;
 
@@ -183,7 +182,7 @@ impl EstimationState {
             seq.kind_times.insert(kind.to_string(), m.total_time());
         }
 
-        if (m.start.z - m.end.z).abs() < EPSILON {
+        if (m.start.z - m.end.z).abs() < f64::EPSILON {
             *seq.layer_times
                 .entry(NotNan::new((m.start.z * 1000.0).round() / 1000.0).unwrap())
                 .or_insert(0.0) += m.total_time();
@@ -329,10 +328,11 @@ impl EstimateCmd {
                         let spacing = " ".repeat(4);
 
                         let term_width = term_size::dimensions().map(|(w, _)| w).unwrap_or(0);
-                        let available_width = (term_width - offset.len()).max(0);
+                        let available_width = term_width.saturating_sub(offset.len());
 
                         let num_columns =
-                            ((available_width - column) / (column + spacing.len()) + 1).max(1);
+                            (available_width.saturating_sub(column) / (column + spacing.len()) + 1)
+                                .max(1);
                         let chunk_size = layer_times.len() / num_columns
                             + usize::from(layer_times.len() % num_columns != 0);
                         let columnized = layer_times.chunks(chunk_size).collect::<Vec<_>>();

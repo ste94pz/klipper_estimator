@@ -162,10 +162,7 @@ impl config::Source for MoonrakerSource {
 
         let res = moonraker_config(&self.url, self.api_key.as_deref(), &mut limits);
         let cfg = if let Err(e) = res {
-            match self.remap_collection_error(e) {
-                Ok(cfg) => cfg,
-                Err(err) => return Err(err),
-            }
+            self.remap_collection_error(e)?
         } else {
             let cfg = serde_json::to_string(&limits).unwrap();
             if let Some(cache_file) = self.cache_file.as_deref() {

@@ -355,10 +355,12 @@ impl EstimateRunner {
             let cmd = cmd.expect("gcode read");
 
             // If we don't have a slicer figured out yet, and this is a comment, try
-            if cmd.op.is_nop() && cmd.comment.is_some() && self.state.result.slicer.is_none() {
-                self.state.result.slicer = SlicerPreset::determine(cmd.comment.as_ref().unwrap());
-                if let Some(preset) = self.state.result.slicer.as_ref() {
-                    self.state.gcode_interceptor = metadata_processor(preset);
+            if cmd.op.is_nop() && self.state.result.slicer.is_none() {
+                if let Some(comment) = cmd.comment.as_ref() {
+                    self.state.result.slicer = SlicerPreset::determine(comment);
+                    if let Some(preset) = self.state.result.slicer.as_ref() {
+                        self.state.gcode_interceptor = metadata_processor(preset);
+                    }
                 }
             }
 

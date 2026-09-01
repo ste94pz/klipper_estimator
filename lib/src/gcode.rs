@@ -398,14 +398,14 @@ mod parser {
         take_while1(|c: char| c.is_alphabetic() || c == '_')(s)
     }
 
-    fn extended_param(s: &str) -> IResult<&str, (&str, Cow<str>)> {
+    fn extended_param(s: &str) -> IResult<&str, (&str, Cow<'_, str>)> {
         let (s, k) = take_until("=")(s)?;
         let (s, _) = tag("=")(s)?;
         let (s, v) = maybe_quoted_string(s)?;
         Ok((s, (k, v)))
     }
 
-    fn maybe_quoted_string(s: &str) -> IResult<&str, Cow<str>> {
+    fn maybe_quoted_string(s: &str) -> IResult<&str, Cow<'_, str>> {
         // Implement shlex non-posix like argument parsing, as used in Klipper
         let quoted = map(
             tuple((char('"'), take_till(|c| c == '"'), char('"'))),
@@ -425,5 +425,39 @@ mod parser {
         let (s, _) = space0(s)?;
         let (s, _) = tag(";")(s)?;
         Ok(("", s.trim_end()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_move_line_number_comment_and_scientific_values() {
+        let command = parse_gcode("N42 G1 X1.25 Y-2 Z3e-1 E.4 F1200 ; perimeter").unwrap();
+        assert_eq!(command.comment.as_deref(), Some(" perimeter"));
+        assert_eq!(
+            command.op,
+            GCodeOperation::Move {
+                x: Some(1.25),
+                y: Some(-2.0),
+                z: Some(0.3),
+                e: Some(0.4),
+                f: Some(1200.0),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_extended_command_with_quoted_parameter() {
+        let command = parse_gcode("SET_GCODE_OFFSET X=1.5 MOVE_SPEED=\"25 mm/s\"").unwrap();
+        match command.op {
+            GCodeOperation::Extended { command, params } => {
+                assert_eq!(command, "set_gcode_offset");
+                assert_eq!(params.get_number::<f64>("x"), Some(1.5));
+                assert_eq!(params.get_string("move_speed"), Some("25 mm/s"));
+            }
+            operation => panic!("unexpected operation: {:?}", operation),
+        }
     }
 }

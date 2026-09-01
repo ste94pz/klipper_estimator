@@ -216,6 +216,29 @@ print start gcode like this:
 print_start extruder=[first_layer_temperature] bed=[first_layer_bed_temperature]
 ```
 
+## Development checks
+
+The normal verification does not require a Klipper checkout:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Planner changes must additionally be checked against the pinned Klipper
+reference. Set `KLIPPER_PATH` if the checkout is not available as `klipper/`:
+
+```sh
+KLIPPER_PATH=/path/to/klipper bash tests/run_klipper_differential.sh
+```
+
+The differential fixtures verify Klipper commit
+`f0892d82b0f1c1228454f09eb508eddde2250f4b`. The test rejects another revision
+instead of silently changing the baseline. Numeric tolerances and the bounded
+extrusion-only sentinel difference are recorded next to the fixtures and test
+code.
+
 ## Building
 
 `klipper_estimator` is written in Rust. Version 1.58 or newer is required to
