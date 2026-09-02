@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "klipper_estimator"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "lib_klipper"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "glam",
  "lazy_static",

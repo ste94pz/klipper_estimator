@@ -5,6 +5,7 @@ use crate::arcs::ArcState;
 pub use crate::firmware_retraction::FirmwareRetractionOptions;
 use crate::firmware_retraction::FirmwareRetractionState;
 use crate::gcode::{GCodeCommand, GCodeOperation};
+use crate::kinematics::{Kinematics, KinematicsChecker, MoveOutOfRange};
 
 use crate::kind_tracker::{Kind, KindTracker};
 use glam::Vec4Swizzles;
@@ -18,7 +19,6 @@ pub struct Planner {
     pub kind_tracker: KindTracker,
     pub firmware_retraction: Option<FirmwareRetractionState>,
     pub arc_state: ArcState,
-    diagnostics: Vec<PlannerDiagnostic>,
 }
 
 impl Planner {
@@ -27,13 +27,16 @@ impl Planner {
             .firmware_retraction
             .as_ref()
             .map(|_| FirmwareRetractionState::default());
+        let mut operations = OperationSequence::default();
+        if let Some((backend, reason)) = limits.kinematics.unsupported_details() {
+            operations.add_diagnostic(PlannerDiagnostic::unsupported_kinematics(backend, reason));
+        }
         Planner {
-            operations: OperationSequence::default(),
+            operations,
             toolhead_state: ToolheadState::from_limits(limits),
             kind_tracker: KindTracker::new(),
             firmware_retraction,
             arc_state: ArcState::default(),
-            diagnostics: Vec::new(),
         }
     }
 
@@ -42,7 +45,7 @@ impl Planner {
     /// Returns the number of planning operations the command resulted in
     pub fn process_cmd(&mut self, cmd: &GCodeCommand) -> usize {
         if Self::is_unsupported_traditional_state_command(cmd) {
-            self.diagnostics.push(PlannerDiagnostic {
+            self.operations.add_diagnostic(PlannerDiagnostic {
                 code: PlannerDiagnosticCode::UnsupportedStateCommand,
                 command: cmd
                     .op
@@ -85,8 +88,8 @@ impl Planner {
                     if let Some(fr) = self.firmware_retraction.as_mut() {
                         return fr.retract(kt, m, seq);
                     }
-                    self.diagnostics
-                        .push(PlannerDiagnostic::unsupported_state_command("g10"));
+                    self.operations
+                        .add_diagnostic(PlannerDiagnostic::unsupported_state_command("g10"));
                 }
                 ('G', 11) => {
                     let kt = &mut self.kind_tracker;
@@ -95,8 +98,8 @@ impl Planner {
                     if let Some(fr) = self.firmware_retraction.as_mut() {
                         return fr.unretract(kt, m, seq);
                     }
-                    self.diagnostics
-                        .push(PlannerDiagnostic::unsupported_state_command("g11"));
+                    self.operations
+                        .add_diagnostic(PlannerDiagnostic::unsupported_state_command("g11"));
                 }
                 ('G', v @ 2 | v @ 3) => {
                     let move_kind = self.kind_tracker.kind_from_comment(&cmd.comment);
@@ -224,15 +227,15 @@ impl Planner {
                         }
                         Ok(None) => {}
                         Err(()) => self
-                            .diagnostics
-                            .push(PlannerDiagnostic::unknown_saved_state(name)),
+                            .operations
+                            .add_diagnostic(PlannerDiagnostic::unknown_saved_state(name)),
                     }
                 }
                 _ => {}
             }
             if Self::is_unsupported_state_command(command) {
-                self.diagnostics
-                    .push(PlannerDiagnostic::unsupported_state_command(command));
+                self.operations
+                    .add_diagnostic(PlannerDiagnostic::unsupported_state_command(command));
             }
             self.operations.add_fill();
         } else if let (true, Some(comment)) = (cmd.op.is_nop(), cmd.comment.as_ref()) {
@@ -266,7 +269,7 @@ impl Planner {
     }
 
     pub fn diagnostics(&self) -> &[PlannerDiagnostic] {
-        &self.diagnostics
+        &self.operations.diagnostics
     }
 
     fn is_unsupported_state_command(command: &str) -> bool {
@@ -395,6 +398,8 @@ pub enum PlanningOperation {
 pub enum PlannerDiagnosticCode {
     UnknownSavedGcodeState,
     UnsupportedStateCommand,
+    UnsupportedKinematics,
+    MoveOutsideKinematicBounds,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -419,6 +424,28 @@ impl PlannerDiagnostic {
             command: command.to_ascii_uppercase(),
             message: "parsed state-changing command is not modeled; estimate is a lower bound"
                 .into(),
+        }
+    }
+
+    fn unsupported_kinematics(backend: &str, reason: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnsupportedKinematics,
+            command: "KINEMATICS".into(),
+            message: format!(
+                "configured Klipper kinematics '{backend}' is unsupported ({reason}); estimate is a lower bound"
+            ),
+        }
+    }
+
+    fn move_out_of_range(violation: MoveOutOfRange) -> Self {
+        let axis = ["X", "Y", "Z"][violation.axis];
+        Self {
+            code: PlannerDiagnosticCode::MoveOutsideKinematicBounds,
+            command: "MOVE".into(),
+            message: format!(
+                "Klipper would reject {axis}={:.6} outside configured range {:.6}..{:.6}",
+                violation.position, violation.minimum, violation.maximum
+            ),
         }
     }
 }
@@ -686,6 +713,7 @@ impl From<OperationSequenceOperation> for PlanningOperation {
 #[derive(Debug, Default)]
 pub struct OperationSequence {
     ops: VecDeque<OperationSequenceOperation>,
+    diagnostics: Vec<PlannerDiagnostic>,
 }
 
 impl OperationSequence {
@@ -693,7 +721,10 @@ impl OperationSequence {
         self.ops.push_back(OperationSequenceOperation::Delay(delay));
     }
 
-    pub(crate) fn add_move(&mut self, move_cmd: PlanningMove, toolhead_state: &ToolheadState) {
+    pub(crate) fn add_move(&mut self, mut move_cmd: PlanningMove, toolhead_state: &ToolheadState) {
+        if let Err(violation) = toolhead_state.limits.kinematics.check_move(&mut move_cmd) {
+            self.add_diagnostic(PlannerDiagnostic::move_out_of_range(violation));
+        }
         if let Some(OperationSequenceOperation::MoveSequence(ms)) = self.ops.back_mut() {
             ms.add_move(move_cmd, toolhead_state);
         } else {
@@ -701,6 +732,12 @@ impl OperationSequence {
             ms.add_move(move_cmd, toolhead_state);
             self.ops
                 .push_back(OperationSequenceOperation::MoveSequence(ms));
+        }
+    }
+
+    fn add_diagnostic(&mut self, diagnostic: PlannerDiagnostic) {
+        if !self.diagnostics.contains(&diagnostic) {
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -948,6 +985,8 @@ pub struct PrinterLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_per_arc_segment: Option<f64>,
     pub move_checkers: Vec<MoveChecker>,
+    #[serde(default, skip_serializing_if = "Kinematics::is_unconfigured")]
+    pub kinematics: Kinematics,
     pub initial_coordinate_mode: PositionMode,
     pub initial_extrusion_mode: PositionMode,
 }
@@ -964,6 +1003,7 @@ impl Default for PrinterLimits {
             mcr_pseudo_accel: 50.0,
             instant_corner_velocity: 1.0,
             move_checkers: vec![],
+            kinematics: Kinematics::Unconfigured,
             firmware_retraction: None,
             mm_per_arc_segment: None,
             initial_coordinate_mode: PositionMode::Absolute,

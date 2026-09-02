@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lib_klipper::glam::DVec3;
+use lib_klipper::kinematics::{CartesianKinematics, CartesianKinematicsKind, Kinematics};
 use lib_klipper::planner::{FirmwareRetractionOptions, MoveChecker, PositionMode, PrinterLimits};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -416,8 +417,19 @@ fn snapshot_from_status(
             extruders: extruder_runtime,
         }),
     };
+    apply_kinematics_classification(&mut snapshot);
     snapshot.refresh_fingerprint();
     Ok(snapshot)
+}
+
+pub(crate) fn apply_kinematics_classification(snapshot: &mut ConfigSnapshot) {
+    if let Some((backend, reason)) = snapshot.limits.kinematics.unsupported_details() {
+        snapshot.accuracy = SnapshotAccuracy::Degraded;
+        let warning = format!("configured Klipper kinematics '{backend}' is unsupported: {reason}");
+        if !snapshot.warnings.contains(&warning) {
+            snapshot.warnings.push(warning);
+        }
+    }
 }
 
 fn take_object(
@@ -476,6 +488,7 @@ fn limits_from_settings(
         "configfile.settings.printer.square_corner_velocity",
     )?);
     limits.set_instant_corner_velocity(primary_extruder.instantaneous_corner_velocity);
+    limits.kinematics = kinematics_from_settings(settings, printer)?;
     limits.move_checkers.push(MoveChecker::ExtruderLimiter {
         max_velocity: primary_extruder.max_extrude_only_velocity,
         max_accel: primary_extruder.max_extrude_only_accel,
@@ -514,6 +527,58 @@ fn limits_from_settings(
         .and_then(Value::as_object)
         .and_then(|object| optional_number(object, "resolution"));
     Ok(limits)
+}
+
+fn kinematics_from_settings(
+    settings: &BTreeMap<String, Value>,
+    printer: &serde_json::Map<String, Value>,
+) -> Result<Kinematics, SnapshotError> {
+    let backend = match printer.get("kinematics").and_then(Value::as_str) {
+        Some(backend) => backend,
+        None => return Ok(Kinematics::Unconfigured),
+    };
+    if settings.contains_key("dual_carriage") {
+        return Ok(Kinematics::unsupported(
+            backend,
+            "dual-carriage active state is not modeled",
+        ));
+    }
+    let kind = match backend {
+        "cartesian" => CartesianKinematicsKind::Cartesian,
+        "corexy" => CartesianKinematicsKind::Corexy,
+        "corexz" => CartesianKinematicsKind::Corexz,
+        "hybrid_corexy" => CartesianKinematicsKind::HybridCorexy,
+        "hybrid_corexz" => CartesianKinematicsKind::HybridCorexz,
+        "generic_cartesian" => {
+            return Ok(Kinematics::unsupported(
+                backend,
+                "generic Cartesian carriage expressions are not modeled",
+            ))
+        }
+        _ => return Ok(Kinematics::unsupported(backend, "backend is not modeled")),
+    };
+
+    let mut axis_minimum = DVec3::ZERO;
+    let mut axis_maximum = DVec3::ZERO;
+    for (axis, name) in ["stepper_x", "stepper_y", "stepper_z"].iter().enumerate() {
+        let object = settings
+            .get(*name)
+            .and_then(Value::as_object)
+            .ok_or_else(|| SnapshotError::MissingField(format!("configfile.settings.{name}")))?;
+        axis_minimum.as_mut()[axis] =
+            number(object, &format!("configfile.settings.{name}.position_min"))?;
+        axis_maximum.as_mut()[axis] =
+            number(object, &format!("configfile.settings.{name}.position_max"))?;
+    }
+    Ok(Kinematics::CartesianFamily {
+        config: CartesianKinematics {
+            kind,
+            axis_minimum,
+            axis_maximum,
+            max_z_velocity: number(printer, "configfile.settings.printer.max_z_velocity")?,
+            max_z_accel: number(printer, "configfile.settings.printer.max_z_accel")?,
+        },
+    })
 }
 
 fn parse_extruders(
@@ -630,7 +695,14 @@ pub fn load_offline_snapshot(
     let mut limits = limits_from_settings(&settings, &extruders)?;
     limits.recalculate();
 
-    let supported = ["printer", "firmware_retraction", "gcode_arcs"];
+    let supported = [
+        "printer",
+        "stepper_x",
+        "stepper_y",
+        "stepper_z",
+        "firmware_retraction",
+        "gcode_arcs",
+    ];
     let unsupported: Vec<_> = sections
         .keys()
         .filter(|name| !supported.contains(&name.as_str()) && !is_extruder_object(name))
@@ -665,6 +737,7 @@ pub fn load_offline_snapshot(
         extruders,
         runtime: None,
     };
+    apply_kinematics_classification(&mut snapshot);
     snapshot.refresh_fingerprint();
     Ok(snapshot)
 }
@@ -1148,6 +1221,38 @@ fn resolve_offline_settings(
     }
     resolved.insert("printer".into(), Value::Object(resolved_printer));
 
+    if matches!(
+        kinematics,
+        Some("cartesian" | "corexy" | "corexz" | "hybrid_corexy" | "hybrid_corexz")
+    ) {
+        for name in ["stepper_x", "stepper_y", "stepper_z"] {
+            let options =
+                sections
+                    .get(name)
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: name.into(),
+                        option: "position_max".into(),
+                    })?;
+            let position_min = optional_float(options, name, "position_min", 0.0, f64::is_finite)?;
+            let position_max =
+                required_float(options, name, "position_max", |value| value > position_min)?;
+            let position_endstop = required_float(options, name, "position_endstop", |value| {
+                value >= position_min && value <= position_max
+            })?;
+            resolved.insert(
+                name.into(),
+                json!({
+                    "position_min": position_min,
+                    "position_max": position_max,
+                    "position_endstop": position_endstop,
+                }),
+            );
+        }
+    }
+    if sections.contains_key("dual_carriage") {
+        resolved.insert("dual_carriage".into(), json!({}));
+    }
+
     let mut configured_extruders: Vec<_> = sections
         .iter()
         .filter(|(name, _)| is_extruder_object(name))
@@ -1401,6 +1506,7 @@ mod tests {
     fn settings() -> BTreeMap<String, Value> {
         serde_json::from_value(json!({
             "printer": {
+                "kinematics": "cartesian",
                 "max_velocity": 300.0,
                 "max_accel": 5000.0,
                 "minimum_cruise_ratio": 0.5,
@@ -1408,6 +1514,9 @@ mod tests {
                 "max_z_velocity": 20.0,
                 "max_z_accel": 100.0
             },
+            "stepper_x": { "position_min": 0.0, "position_max": 250.0 },
+            "stepper_y": { "position_min": 0.0, "position_max": 240.0 },
+            "stepper_z": { "position_min": 0.0, "position_max": 220.0 },
             "extruder": {
                 "max_extrude_only_velocity": 25.0,
                 "max_extrude_only_accel": 1250.0,
@@ -1477,9 +1586,51 @@ mod tests {
             PositionMode::Absolute
         );
         assert_eq!(defaults.extruders.len(), 2);
+        assert!(matches!(
+            defaults.limits.kinematics,
+            Kinematics::CartesianFamily { .. }
+        ));
+        assert_eq!(defaults.accuracy, SnapshotAccuracy::Complete);
         assert_ne!(defaults.fingerprint, runtime.fingerprint);
         defaults.validate().unwrap();
         runtime.validate().unwrap();
+    }
+
+    #[test]
+    fn unsupported_kinematics_degrades_snapshot_accuracy() {
+        let mut unsupported_status = status();
+        unsupported_status
+            .get_mut("configfile")
+            .and_then(Value::as_object_mut)
+            .and_then(|configfile| configfile.get_mut("settings"))
+            .and_then(Value::as_object_mut)
+            .and_then(|settings| settings.get_mut("printer"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("kinematics".into(), json!("delta"));
+        let snapshot = snapshot_from_status(
+            "http://printer.local",
+            SnapshotSelection::ConfigurationDefault,
+            Some("v0.13.0-test".into()),
+            unsupported_status,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.accuracy, SnapshotAccuracy::Degraded);
+        assert!(matches!(
+            snapshot.limits.kinematics,
+            Kinematics::Unsupported { .. }
+        ));
+        assert!(snapshot
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("delta")));
+
+        let mut dual_carriage_settings = settings();
+        dual_carriage_settings.insert("dual_carriage".into(), json!({ "axis": "x" }));
+        let extruders = parse_extruders(&dual_carriage_settings).unwrap();
+        let limits = limits_from_settings(&dual_carriage_settings, &extruders).unwrap();
+        assert!(matches!(limits.kinematics, Kinematics::Unsupported { .. }));
     }
 
     #[test]
@@ -1609,6 +1760,15 @@ max_velocity: 300
 [include conf.d/*.cfg]
 [printer]
 max_accel: 5000
+[stepper_x]
+position_endstop: 0
+position_max: 250
+[stepper_y]
+position_endstop: 0
+position_max: 240
+[stepper_z]
+position_endstop: 0
+position_max: 220
 #*# <---------------------- SAVE_CONFIG ---------------------->
 #*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
 #*#
@@ -1640,6 +1800,13 @@ max_velocity: 250
         assert_eq!(offline.limits.max_velocity, 250.0);
         assert_eq!(offline.limits.max_acceleration, 5000.0);
         assert_eq!(offline.limits.minimum_cruise_ratio, Some(0.5));
+        match &offline.limits.kinematics {
+            Kinematics::CartesianFamily { config } => {
+                assert_eq!(config.kind, CartesianKinematicsKind::Cartesian);
+                assert_eq!(config.axis_maximum, DVec3::new(250.0, 240.0, 220.0));
+            }
+            other => panic!("expected resolved Cartesian kinematics, got {:?}", other),
+        }
         assert_eq!(offline.limits.mm_per_arc_segment, Some(1.0));
         assert_eq!(
             offline

@@ -14,11 +14,10 @@ the Klipper firmware. Currently it provides the following modes:
     the gcode output file with corrected time estimates.
   * `dump-moves` mode dumps planning data for every move in a file
 
-The estimation is done using an implementation of Klippers kinematics, but may
-in some cases be slightly off due to rounding modes. If the timing is far
-off(e.g. more than a minute over a >12 hour print), this is considered a bug. 
-
-Note that currently delta kinematic limits are _not_ implemented.
+The estimator mirrors Klipper's motion planner and the supported kinematics
+described below. Small numeric differences may remain due to rounding modes. If
+the timing is far off (for example, more than a minute over a 12-hour print),
+this is considered a bug.
 
 ## Getting `klipper_estimator`
 
@@ -85,10 +84,11 @@ are allowed to match no files, as in Klipper.
 The resulting snapshot has source `offline_configuration` and selection
 `configuration_default`. It resolves the Klipper defaults currently consumed
 by the estimator for `[printer]`, every contiguous `[extruderN]`,
-`[firmware_retraction]`, and `[gcode_arcs]`. Other sections are listed in the
-snapshot warnings and are not assigned guessed values. A live Moonraker
-snapshot remains preferable when available because Klipper itself then
-provides all resolved settings and its version.
+`[stepper_x]`/`[stepper_y]`/`[stepper_z]`, `[firmware_retraction]`, and
+`[gcode_arcs]`. Other sections are listed in the snapshot warnings and are not
+assigned guessed values. A live Moonraker snapshot remains preferable when
+available because Klipper itself then provides all resolved settings and its
+version.
 
 To experiment with settings, use `dump-config` together with
 `--config_moonraker_url` to export a complete snapshot. The result can be
@@ -181,6 +181,23 @@ Commands that make Klipper wait for or flush queued motion form lookahead
 boundaries in the estimate. This includes `M400`, `G4`, homing, temperature
 waits, and the estimator's existing indeterminate wait operations. Motion on
 the two sides of a boundary therefore starts or ends at rest as appropriate.
+
+#### Cartesian-family kinematics
+
+The estimator applies Klipper's configured axis ranges, `max_z_velocity`, and
+`max_z_accel` for `cartesian`, `corexy`, `corexz`, `hybrid_corexy`, and
+`hybrid_corexz`. Z limits are scaled by the Z component of a diagonal move in
+the same way as Klipper. Because a print file is estimated for a prepared
+printer, configured axes are treated as homed; a move outside their range
+produces a structured `move_outside_kinematic_bounds` diagnostic indicating
+that Klipper would reject the file.
+
+`generic_cartesian`, dual-carriage configurations, and non-linear backends are
+not approximated as Cartesian. Their snapshot has degraded accuracy, names the
+unsupported backend in its warnings, and produces an
+`unsupported_kinematics` planner diagnostic. Generic Cartesian carriage
+expressions and active dual-carriage state must be modeled before those
+configurations can be supported safely.
 
 ### `estimate` mode
 

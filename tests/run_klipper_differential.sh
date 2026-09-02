@@ -23,3 +23,10 @@ KLIPPER_PATH="$klipper_path" cargo test \
     --test gcode_state_differential \
     command_sequence_matches_pinned_klipper_gcode_move \
     -- --exact
+
+KLIPPER_PATH="$klipper_path" cargo test \
+    --manifest-path "$repository_root/Cargo.toml" \
+    -p lib_klipper \
+    --test kinematics_differential \
+    cartesian_family_matches_pinned_klipper_check_move \
+    -- --exact

@@ -39,6 +39,15 @@ the initial printer limits are correct; recognized unsupported state changes
 are returned as structured diagnostics instead of being silently assigned zero
 effect.
 
+For `cartesian`, `corexy`, `corexz`, `hybrid_corexy`, and `hybrid_corexz`, the
+snapshot also carries XYZ travel ranges and the configured Z velocity and
+acceleration limits. The planner applies the same component-based Z scaling as
+Klipper, including diagonal moves, and diagnoses endpoints outside the
+configured range. It assumes the axes have already been homed before the print.
+Generic Cartesian expressions, dual-carriage active state, and non-linear
+kinematics are not approximated: they degrade the snapshot accuracy and emit a
+structured unsupported-kinematics diagnostic.
+
 ## What is not generally predictable from the file
 
 Klipper macros may inspect live printer state and execute different commands on each run. Heating, homing, probing, filament changes, user pauses, recovery, and network or host delays may also add wall-clock time that is not represented by normal movement commands.
