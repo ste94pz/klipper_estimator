@@ -9,6 +9,7 @@ PINNED_KLIPPER_COMMIT below.
 import importlib.util
 import json
 import math
+import os
 import pathlib
 import subprocess
 import sys
@@ -86,7 +87,7 @@ def main():
         capture_output=True,
         text=True,
     ).stdout.strip()
-    if commit != PINNED_KLIPPER_COMMIT:
+    if commit != PINNED_KLIPPER_COMMIT and os.environ.get("KLIPPER_ALLOW_UNPINNED") != "1":
         raise SystemExit(
             "Klipper reference mismatch: expected "
             f"{PINNED_KLIPPER_COMMIT}, found {commit}"

@@ -13,9 +13,9 @@ mod config_snapshot;
 mod duration;
 
 use config_snapshot::{
-    apply_kinematics_classification, fetch_moonraker_snapshot, load_offline_snapshot,
-    map_auth_error, read_cache, write_cache, ConfigSnapshot, SnapshotAccuracy, SnapshotSelection,
-    SnapshotSource, SnapshotSourceKind,
+    apply_kinematics_classification, apply_klipper_compatibility, fetch_moonraker_snapshot,
+    load_offline_snapshot, map_auth_error, read_cache, write_cache, ConfigSnapshot,
+    SnapshotAccuracy, SnapshotSelection, SnapshotSource, SnapshotSourceKind,
 };
 
 #[derive(Parser, Debug)]
@@ -229,6 +229,7 @@ impl Opts {
         limits.recalculate();
         snapshot.limits = limits;
         apply_kinematics_classification(&mut snapshot);
+        apply_klipper_compatibility(&mut snapshot);
         if !self.config_override.is_empty() {
             snapshot.source.kind = SnapshotSourceKind::Merged;
             snapshot

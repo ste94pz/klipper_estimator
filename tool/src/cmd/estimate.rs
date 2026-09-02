@@ -11,7 +11,7 @@ use ordered_float::NotNan;
 use serde::{ser::SerializeSeq, Serialize, Serializer};
 
 use crate::calibration::{fetch_history_calibration, CalibrationReport};
-use crate::config_snapshot::ConfigSnapshotSummary;
+use crate::config_snapshot::{ConfigSnapshot, ConfigSnapshotSummary, SnapshotAccuracy};
 use crate::duration::DurationEstimate;
 use crate::Opts;
 
@@ -72,6 +72,7 @@ pub struct EstimateCmd {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 struct EstimationState {
+    metadata: EstimationMetadata,
     configuration: Option<ConfigSnapshotSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<CalibrationReport>,
@@ -79,6 +80,40 @@ struct EstimationState {
     duration: DurationEstimate,
     sequences: Vec<EstimationSequence>,
     diagnostics: Vec<PlannerDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EstimateAccuracyClass {
+    #[default]
+    Complete,
+    Degraded,
+    LowerBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+struct EstimationMetadata {
+    estimator_version: String,
+    klipper_version: Option<String>,
+    configuration_fingerprint: String,
+    backend: String,
+    accuracy_class: EstimateAccuracyClass,
+}
+
+impl EstimationMetadata {
+    fn from_snapshot(snapshot: &ConfigSnapshot) -> Self {
+        Self {
+            estimator_version: env!("TOOL_VERSION").into(),
+            klipper_version: snapshot.klipper_version.clone(),
+            configuration_fingerprint: snapshot.fingerprint.clone(),
+            backend: snapshot.limits.kinematics.backend_name().into(),
+            accuracy_class: if snapshot.accuracy == SnapshotAccuracy::Complete {
+                EstimateAccuracyClass::Complete
+            } else {
+                EstimateAccuracyClass::Degraded
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
@@ -130,6 +165,12 @@ fn serialize_layer_times<S: Serializer>(
 }
 
 impl EstimationState {
+    fn finalize_accuracy_class(&mut self) {
+        if !self.diagnostics.is_empty() || !self.duration.omitted_duration_components.is_empty() {
+            self.metadata.accuracy_class = EstimateAccuracyClass::LowerBound;
+        }
+    }
+
     fn add(&mut self, planner: &Planner, op: &PlanningOperation) {
         self.duration.add_operation(planner, op);
         match op {
@@ -261,9 +302,11 @@ impl EstimateCmd {
         };
         let rdr = GCodeReader::new(BufReader::new(src));
 
+        let snapshot = opts.config_snapshot();
         let mut planner = opts.make_planner();
         let mut state = EstimationState {
-            configuration: Some(opts.config_snapshot().summary()),
+            metadata: EstimationMetadata::from_snapshot(snapshot),
+            configuration: Some(snapshot.summary()),
             ..EstimationState::default()
         };
 
@@ -283,6 +326,7 @@ impl EstimateCmd {
             state.add(&planner, &o);
         }
         state.diagnostics = planner.diagnostics().to_vec();
+        state.finalize_accuracy_class();
 
         if self.history_calibration {
             let fingerprint = state
@@ -316,6 +360,18 @@ impl EstimateCmd {
 
         match self.format {
             OutputFormat::Human => {
+                println!(
+                    "Estimator: {} | Klipper: {} | Backend: {} | Accuracy: {:?}",
+                    state.metadata.estimator_version,
+                    state
+                        .metadata
+                        .klipper_version
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    state.metadata.backend,
+                    state.metadata.accuracy_class
+                );
+                println!();
                 if let Some(configuration) = &state.configuration {
                     println!("Configuration: {}", configuration.fingerprint);
                     for warning in &configuration.warnings {
@@ -647,8 +703,10 @@ impl DumpMovesCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_snapshot::ConfigSnapshot;
+    use crate::duration::OmittedDurationComponent;
     use lib_klipper::gcode::parse_gcode;
-    use lib_klipper::planner::{ExtruderLimits, PrinterLimits};
+    use lib_klipper::planner::{ExtruderLimits, PrinterLimits, UnknownDurationCategory};
 
     #[test]
     fn filament_statistics_keep_sign_and_tool_identity() {
@@ -687,5 +745,39 @@ mod tests {
         assert_eq!(stats["extruder1"].net_distance, 3.0);
         assert_eq!(stats["extruder1"].extruded_distance, 3.0);
         assert_eq!(stats["extruder1"].retracted_distance, 0.0);
+    }
+
+    #[test]
+    fn estimate_metadata_exposes_reproducibility_context() {
+        let mut snapshot = ConfigSnapshot::built_in_defaults();
+        snapshot.klipper_version = Some("v0.13.0-745-gf0892d82b".into());
+        snapshot.refresh_fingerprint();
+
+        let metadata = EstimationMetadata::from_snapshot(&snapshot);
+        let json = serde_json::to_value(metadata).unwrap();
+        assert_eq!(json["estimator_version"], env!("TOOL_VERSION"));
+        assert_eq!(json["klipper_version"], "v0.13.0-745-gf0892d82b");
+        assert_eq!(json["configuration_fingerprint"], snapshot.fingerprint);
+        assert_eq!(json["backend"], "unconfigured");
+        assert_eq!(json["accuracy_class"], "degraded");
+    }
+
+    #[test]
+    fn omitted_duration_makes_the_accuracy_class_a_lower_bound() {
+        let mut state = EstimationState::default();
+        state
+            .duration
+            .omitted_duration_components
+            .push(OmittedDurationComponent {
+                command: "PRINT_START".into(),
+                category: UnknownDurationCategory::CommandOrMacro,
+                reason: "duration is unknown and was not included".into(),
+            });
+        state.finalize_accuracy_class();
+
+        assert_eq!(
+            state.metadata.accuracy_class,
+            EstimateAccuracyClass::LowerBound
+        );
     }
 }

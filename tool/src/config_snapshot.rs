@@ -22,6 +22,53 @@ use thiserror::Error;
 use url::Url;
 
 pub const CONFIG_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const PINNED_KLIPPER_COMMIT: &str = "f0892d82b0f1c1228454f09eb508eddde2250f4b";
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum KlipperCompatibility {
+    Supported,
+    Unknown,
+    Unsupported,
+}
+
+pub fn classify_klipper_version(version: Option<&str>) -> KlipperCompatibility {
+    let version = match version {
+        Some(version) => version,
+        None => return KlipperCompatibility::Unknown,
+    };
+    if version == PINNED_KLIPPER_COMMIT {
+        return KlipperCompatibility::Supported;
+    }
+    if version.ends_with("-dirty") {
+        return KlipperCompatibility::Unsupported;
+    }
+    let revision = version
+        .rsplit_once("-g")
+        .map(|(_, revision)| revision)
+        .unwrap_or("");
+    if revision.len() >= 7 && PINNED_KLIPPER_COMMIT.starts_with(revision) {
+        KlipperCompatibility::Supported
+    } else {
+        KlipperCompatibility::Unsupported
+    }
+}
+
+pub fn apply_klipper_compatibility(snapshot: &mut ConfigSnapshot) {
+    let warning = match classify_klipper_version(snapshot.klipper_version.as_deref()) {
+        KlipperCompatibility::Supported => return,
+        KlipperCompatibility::Unknown => format!(
+            "Klipper version is unavailable; compatibility with pinned commit {PINNED_KLIPPER_COMMIT} cannot be verified"
+        ),
+        KlipperCompatibility::Unsupported => format!(
+            "Klipper version '{}' is outside the supported policy (pinned commit {PINNED_KLIPPER_COMMIT}); differential compatibility is not guaranteed",
+            snapshot.klipper_version.as_deref().unwrap_or("unknown")
+        ),
+    };
+    snapshot.accuracy = SnapshotAccuracy::Degraded;
+    if !snapshot.warnings.contains(&warning) {
+        snapshot.warnings.push(warning);
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize, clap::ArgEnum)]
 #[serde(rename_all = "snake_case")]
@@ -2611,6 +2658,44 @@ pub fn map_auth_error(error: &SnapshotError) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn klipper_compatibility_policy_accepts_only_the_clean_pinned_revision() {
+        assert_eq!(
+            classify_klipper_version(Some("v0.13.0-745-gf0892d82b")),
+            KlipperCompatibility::Supported
+        );
+        assert_eq!(
+            classify_klipper_version(Some(PINNED_KLIPPER_COMMIT)),
+            KlipperCompatibility::Supported
+        );
+        assert_eq!(
+            classify_klipper_version(Some("v0.13.0-745-gf0892d82b-dirty")),
+            KlipperCompatibility::Unsupported
+        );
+        assert_eq!(
+            classify_klipper_version(Some("v0.14.0-1-g0123456789")),
+            KlipperCompatibility::Unsupported
+        );
+        assert_eq!(
+            classify_klipper_version(None),
+            KlipperCompatibility::Unknown
+        );
+    }
+
+    #[test]
+    fn unsupported_klipper_version_degrades_snapshot_with_a_stable_warning() {
+        let mut snapshot = ConfigSnapshot::built_in_defaults();
+        snapshot.accuracy = SnapshotAccuracy::Complete;
+        snapshot.warnings.clear();
+        snapshot.klipper_version = Some("v0.14.0-1-g0123456789".into());
+        apply_klipper_compatibility(&mut snapshot);
+        apply_klipper_compatibility(&mut snapshot);
+
+        assert_eq!(snapshot.accuracy, SnapshotAccuracy::Degraded);
+        assert_eq!(snapshot.warnings.len(), 1);
+        assert!(snapshot.warnings[0].contains("outside the supported policy"));
+    }
 
     struct TestDirectory(PathBuf);
 

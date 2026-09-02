@@ -1,0 +1,41 @@
+name: Klipper differential drift
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pinned:
+    name: Pinned baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Klipper3d/klipper
+          ref: f0892d82b0f1c1228454f09eb508eddde2250f4b
+          path: klipper-reference
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: KLIPPER_PATH="$GITHUB_WORKSPACE/klipper-reference" bash tests/run_klipper_differential.sh
+
+  recent:
+    name: Recent Klipper drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Klipper3d/klipper
+          path: klipper-reference
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compare current Klipper with estimator fixtures
+        env:
+          KLIPPER_PATH: ${{ github.workspace }}/klipper-reference
+          KLIPPER_ALLOW_UNPINNED: "1"
+        run: bash tests/run_klipper_differential.sh

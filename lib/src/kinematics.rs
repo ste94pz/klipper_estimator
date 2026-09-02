@@ -136,6 +136,24 @@ pub trait KinematicsChecker {
 }
 
 impl Kinematics {
+    pub fn backend_name(&self) -> &str {
+        match self {
+            Self::Unconfigured => "unconfigured",
+            Self::CartesianFamily { config } => match config.kind {
+                CartesianKinematicsKind::Cartesian => "cartesian",
+                CartesianKinematicsKind::Corexy => "corexy",
+                CartesianKinematicsKind::Corexz => "corexz",
+                CartesianKinematicsKind::HybridCorexy => "hybrid_corexy",
+                CartesianKinematicsKind::HybridCorexz => "hybrid_corexz",
+            },
+            Self::Delta { .. } => "delta",
+            Self::Polar { .. } => "polar",
+            Self::Deltesian { .. } => "deltesian",
+            Self::RotaryDelta { .. } => "rotary_delta",
+            Self::Unsupported { backend, .. } => backend,
+        }
+    }
+
     pub fn is_unconfigured(&self) -> bool {
         matches!(self, Self::Unconfigured)
     }

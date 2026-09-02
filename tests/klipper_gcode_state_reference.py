@@ -5,6 +5,7 @@ import importlib.util
 import json
 import pathlib
 import shlex
+import os
 import subprocess
 import sys
 
@@ -71,7 +72,7 @@ def main():
         capture_output=True,
         text=True,
     ).stdout.strip()
-    if commit != PINNED_KLIPPER_COMMIT:
+    if commit != PINNED_KLIPPER_COMMIT and os.environ.get("KLIPPER_ALLOW_UNPINNED") != "1":
         raise SystemExit(
             f"Klipper reference mismatch: expected {PINNED_KLIPPER_COMMIT}, found {commit}"
         )

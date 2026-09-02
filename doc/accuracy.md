@@ -150,3 +150,20 @@ When reporting an accuracy problem, include the G-code, dumped estimator
 snapshot and its fingerprint, estimator version, actual print duration, and
 whether the print contained pauses or runtime overrides. Remove credentials
 and private macro contents before sharing files.
+
+## Compatibility metadata
+
+Released estimates declare their compatibility context in the top-level JSON
+`metadata` object: estimator version, reported Klipper version, configuration
+fingerprint, kinematics backend, and an accuracy class. `complete` means the
+configuration is supported and no known lower-bound condition was observed;
+`degraded` identifies incomplete or unverified configuration provenance; and
+`lower_bound` means a planner diagnostic or omitted duration component is
+known to affect the result.
+
+The supported Klipper policy is intentionally narrow: the clean pinned commit
+`f0892d82b0f1c1228454f09eb508eddde2250f4b`. A different, dirty, or unavailable
+version is not approximated as supported. Estimation can continue, but the
+configuration is degraded with an explicit warning. Scheduled differential
+tests compare both the pinned reference and an opt-in current Klipper checkout
+so upstream drift is visible without silently moving the release baseline.

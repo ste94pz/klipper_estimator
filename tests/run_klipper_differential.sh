@@ -10,6 +10,15 @@ if [[ ! -f "$klipper_path/klippy/toolhead.py" ]]; then
     exit 1
 fi
 
+actual_commit=$(git -C "$klipper_path" rev-parse HEAD)
+if [[ "$actual_commit" != "f0892d82b0f1c1228454f09eb508eddde2250f4b" && "${KLIPPER_ALLOW_UNPINNED:-}" != "1" ]]; then
+    echo "Klipper reference mismatch: expected f0892d82b0f1c1228454f09eb508eddde2250f4b, found $actual_commit" >&2
+    echo "Set KLIPPER_ALLOW_UNPINNED=1 only for opt-in drift detection." >&2
+    exit 1
+fi
+
+echo "Differential reference: $actual_commit"
+
 KLIPPER_PATH="$klipper_path" cargo test \
     --manifest-path "$repository_root/Cargo.toml" \
     -p lib_klipper \

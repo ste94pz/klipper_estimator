@@ -16,6 +16,7 @@ fn main() -> Result<()> {
 
     let version = std::env::var("TOOL_VERSION")
         .or_else(|_| describe_git())
+        .or_else(|_| std::env::var("CARGO_PKG_VERSION"))
         .unwrap_or_else(|_| "unknown".into());
 
     println!("cargo:rustc-env=TOOL_VERSION={version}");

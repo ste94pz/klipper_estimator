@@ -119,6 +119,15 @@ and JSON output reports `configuration.accuracy` as `degraded` together with
 the reason. Estimate JSON always includes the configuration source, fingerprint,
 retrieval time, Klipper version, and warnings.
 
+The supported compatibility baseline is the clean Klipper commit
+`f0892d82b0f1c1228454f09eb508eddde2250f4b` (reported by Klipper as
+`v0.13.0-745-gf0892d82b`). Other revisions remain usable for investigation but
+produce a machine-readable warning and degrade estimate accuracy; an unknown
+version is treated the same way. The estimate `metadata` object reports the
+estimator and Klipper versions, configuration fingerprint, kinematics backend,
+and final `accuracy_class`. Unsupported state or omitted duration effects make
+that class `lower_bound`.
+
 ### Quirks
 
 Be aware of the following "quirks" when using `klipper_estimator` compared to Klipper itself:
@@ -484,6 +493,12 @@ The differential fixtures verify Klipper commit
 `f0892d82b0f1c1228454f09eb508eddde2250f4b`. The test rejects another revision
 instead of silently changing the baseline. Numeric tolerances and fixture
 provenance are recorded next to the fixtures and test code.
+
+The scheduled compatibility workflow runs this strict baseline and an opt-in
+comparison against current Klipper. To reproduce only the drift comparison,
+set both `KLIPPER_PATH` and `KLIPPER_ALLOW_UNPINNED=1`; this opt-in never changes
+the supported baseline. A representative large-file CPU and peak-memory
+benchmark is documented in `benchmarks/README.md`.
 
 ## Building
 
