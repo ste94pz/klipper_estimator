@@ -8,7 +8,9 @@ use lib_klipper::kinematics::{
     CartesianKinematics, CartesianKinematicsKind, DeltaKinematics, DeltesianKinematics, Kinematics,
     PolarKinematics, RotaryDeltaKinematics,
 };
-use lib_klipper::planner::{FirmwareRetractionOptions, MoveChecker, PositionMode, PrinterLimits};
+use lib_klipper::planner::{
+    ExtruderLimits, FirmwareRetractionOptions, MoveChecker, PositionMode, PrinterLimits,
+};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -60,13 +62,31 @@ pub struct RuntimeObjects {
     pub extruders: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExtruderSnapshot {
+    pub nozzle_diameter: f64,
+    pub filament_diameter: f64,
     pub max_extrude_only_velocity: f64,
     pub max_extrude_only_accel: f64,
+    pub max_extrude_only_distance: f64,
     pub instantaneous_corner_velocity: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_extrude_cross_section: Option<f64>,
+    pub max_extrude_cross_section: f64,
+}
+
+impl Default for ExtruderSnapshot {
+    fn default() -> Self {
+        let defaults = ExtruderLimits::default();
+        Self {
+            nozzle_diameter: defaults.nozzle_diameter,
+            filament_diameter: defaults.filament_diameter,
+            max_extrude_only_velocity: defaults.max_extrude_only_velocity,
+            max_extrude_only_accel: defaults.max_extrude_only_accel,
+            max_extrude_only_distance: defaults.max_extrude_only_distance,
+            instantaneous_corner_velocity: defaults.instantaneous_corner_velocity,
+            max_extrude_cross_section: defaults.max_extrude_cross_section,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +175,29 @@ impl ConfigSnapshot {
         self.fingerprint = self.calculate_fingerprint();
     }
 
+    pub(crate) fn upgrade_legacy_extruders(&mut self) -> Result<(), SnapshotError> {
+        if !self.limits.extruders.is_empty() || self.configfile_settings.is_empty() {
+            return Ok(());
+        }
+        let extruders = parse_extruders(&self.configfile_settings)?;
+        apply_extruder_limits(&mut self.limits, &extruders);
+        self.extruders = extruders;
+        if self.source.selection == SnapshotSelection::RuntimeSnapshot {
+            if let Some(active) = self
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.toolhead.get("extruder"))
+                .and_then(Value::as_str)
+            {
+                self.limits.initial_extruder = Some(active.into());
+            }
+        }
+        self.warnings
+            .push("migrated legacy snapshot to the per-extruder limit model".into());
+        self.refresh_fingerprint();
+        Ok(())
+    }
+
     fn calculate_fingerprint(&self) -> String {
         #[derive(Serialize)]
         struct FingerprintInput<'a> {
@@ -194,6 +237,8 @@ pub enum SnapshotError {
     MissingObject(String),
     #[error("Moonraker response is missing required field '{0}'")]
     MissingField(String),
+    #[error("Moonraker reports unknown active extruder '{0}'")]
+    UnknownActiveExtruder(String),
     #[error("invalid {backend} kinematics geometry: {reason}")]
     InvalidKinematicsGeometry { backend: String, reason: String },
     #[error("unsupported configuration snapshot schema {0}")]
@@ -602,11 +647,8 @@ fn limits_from_settings(
         "configfile.settings.printer.square_corner_velocity",
     )?);
     limits.set_instant_corner_velocity(primary_extruder.instantaneous_corner_velocity);
+    apply_extruder_limits(&mut limits, extruders);
     limits.kinematics = kinematics_from_settings(settings, printer)?;
-    limits.move_checkers.push(MoveChecker::ExtruderLimiter {
-        max_velocity: primary_extruder.max_extrude_only_velocity,
-        max_accel: primary_extruder.max_extrude_only_accel,
-    });
 
     for (axis, prefix) in [(DVec3::X, "x"), (DVec3::Y, "y"), (DVec3::Z, "z")] {
         let velocity = optional_number(printer, &format!("max_{prefix}_velocity"));
@@ -641,6 +683,29 @@ fn limits_from_settings(
         .and_then(Value::as_object)
         .and_then(|object| optional_number(object, "resolution"));
     Ok(limits)
+}
+
+fn apply_extruder_limits(
+    limits: &mut PrinterLimits,
+    extruders: &BTreeMap<String, ExtruderSnapshot>,
+) {
+    limits.extruders = extruders
+        .iter()
+        .map(|(name, extruder)| {
+            (
+                name.clone(),
+                ExtruderLimits {
+                    nozzle_diameter: extruder.nozzle_diameter,
+                    filament_diameter: extruder.filament_diameter,
+                    max_extrude_only_velocity: extruder.max_extrude_only_velocity,
+                    max_extrude_only_accel: extruder.max_extrude_only_accel,
+                    max_extrude_only_distance: extruder.max_extrude_only_distance,
+                    instantaneous_corner_velocity: extruder.instantaneous_corner_velocity,
+                    max_extrude_cross_section: extruder.max_extrude_cross_section,
+                },
+            )
+        })
+        .collect();
 }
 
 fn kinematics_from_settings(
@@ -999,6 +1064,14 @@ fn parse_extruders(
             Ok((
                 name.clone(),
                 ExtruderSnapshot {
+                    nozzle_diameter: number(
+                        object,
+                        &format!("configfile.settings.{name}.nozzle_diameter"),
+                    )?,
+                    filament_diameter: number(
+                        object,
+                        &format!("configfile.settings.{name}.filament_diameter"),
+                    )?,
                     max_extrude_only_velocity: number(
                         object,
                         &format!("configfile.settings.{name}.max_extrude_only_velocity"),
@@ -1007,11 +1080,18 @@ fn parse_extruders(
                         object,
                         &format!("configfile.settings.{name}.max_extrude_only_accel"),
                     )?,
+                    max_extrude_only_distance: number(
+                        object,
+                        &format!("configfile.settings.{name}.max_extrude_only_distance"),
+                    )?,
                     instantaneous_corner_velocity: number(
                         object,
                         &format!("configfile.settings.{name}.instantaneous_corner_velocity"),
                     )?,
-                    max_extrude_cross_section: optional_number(object, "max_extrude_cross_section"),
+                    max_extrude_cross_section: number(
+                        object,
+                        &format!("configfile.settings.{name}.max_extrude_cross_section"),
+                    )?,
                 },
             ))
         })
@@ -1028,6 +1108,14 @@ fn apply_runtime_limits(
     limits.set_max_acceleration(number(&toolhead, "toolhead.max_accel")?);
     limits.set_square_corner_velocity(number(&toolhead, "toolhead.square_corner_velocity")?);
     limits.set_minimum_cruise_ratio(number(&toolhead, "toolhead.minimum_cruise_ratio")?);
+    let active_extruder = toolhead
+        .get("extruder")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SnapshotError::MissingField("toolhead.extruder".into()))?;
+    if !limits.extruders.contains_key(active_extruder) {
+        return Err(SnapshotError::UnknownActiveExtruder(active_extruder.into()));
+    }
+    limits.initial_extruder = Some(active_extruder.into());
     limits.initial_coordinate_mode = bool_mode(gcode_move, "absolute_coordinates")?;
     limits.initial_extrusion_mode = bool_mode(gcode_move, "absolute_extrude")?;
     Ok(())
@@ -1978,6 +2066,16 @@ fn resolve_offline_settings(
             )?),
         );
         object.insert(
+            "max_extrude_only_distance".into(),
+            json!(optional_float(
+                options,
+                name,
+                "max_extrude_only_distance",
+                50.0,
+                |value| value >= 0.0,
+            )?),
+        );
+        object.insert(
             "instantaneous_corner_velocity".into(),
             json!(optional_float(
                 options,
@@ -2097,6 +2195,7 @@ pub fn read_cache(
     match serde_json::from_slice::<ConfigSnapshot>(&bytes) {
         Ok(mut snapshot) => {
             snapshot.validate()?;
+            snapshot.upgrade_legacy_extruders()?;
             snapshot.source.kind = SnapshotSourceKind::MoonrakerCache;
             snapshot.source.location = Some(path.into());
             snapshot.accuracy = SnapshotAccuracy::Degraded;
@@ -2185,15 +2284,22 @@ mod tests {
             "stepper_y": { "position_min": 0.0, "position_max": 240.0 },
             "stepper_z": { "position_min": 0.0, "position_max": 220.0 },
             "extruder": {
+                "nozzle_diameter": 0.4,
+                "filament_diameter": 1.75,
                 "max_extrude_only_velocity": 25.0,
                 "max_extrude_only_accel": 1250.0,
+                "max_extrude_only_distance": 50.0,
                 "instantaneous_corner_velocity": 1.0,
                 "max_extrude_cross_section": 5.0
             },
             "extruder1": {
+                "nozzle_diameter": 0.6,
+                "filament_diameter": 1.75,
                 "max_extrude_only_velocity": 30.0,
                 "max_extrude_only_accel": 1300.0,
-                "instantaneous_corner_velocity": 1.5
+                "max_extrude_only_distance": 40.0,
+                "instantaneous_corner_velocity": 1.5,
+                "max_extrude_cross_section": 1.44
             }
         }))
         .unwrap()
@@ -2207,7 +2313,8 @@ mod tests {
                 "max_velocity": 180.0,
                 "max_accel": 2500.0,
                 "minimum_cruise_ratio": 0.25,
-                "square_corner_velocity": 4.0
+                "square_corner_velocity": 4.0,
+                "extruder": "extruder1"
             },
             "gcode_move": {
                 "absolute_coordinates": false,
@@ -2253,6 +2360,11 @@ mod tests {
             PositionMode::Absolute
         );
         assert_eq!(defaults.extruders.len(), 2);
+        assert_eq!(defaults.limits.initial_extruder, None);
+        assert_eq!(
+            runtime.limits.initial_extruder.as_deref(),
+            Some("extruder1")
+        );
         assert!(matches!(
             defaults.limits.kinematics,
             Kinematics::CartesianFamily { .. }
@@ -2511,6 +2623,36 @@ lower_arm_length: 320
             .unwrap();
         imported_json5.validate().unwrap();
         assert_eq!(imported_json5.fingerprint, snapshot.fingerprint);
+    }
+
+    #[test]
+    fn legacy_snapshot_upgrades_to_per_extruder_limits_after_validation() {
+        let mut legacy = snapshot_from_status(
+            "http://printer.local",
+            SnapshotSelection::ConfigurationDefault,
+            Some("v0.13.0-test".into()),
+            status(),
+        )
+        .unwrap();
+        legacy.limits.extruders.clear();
+        legacy.limits.initial_extruder = None;
+        legacy.refresh_fingerprint();
+
+        let encoded = serde_json::to_vec(&legacy).unwrap();
+        let mut imported: ConfigSnapshot = serde_json::from_slice(&encoded).unwrap();
+        imported.validate().unwrap();
+        imported.upgrade_legacy_extruders().unwrap();
+
+        assert_eq!(imported.limits.extruders.len(), 2);
+        assert_eq!(
+            imported.limits.extruders["extruder1"].max_extrude_only_velocity,
+            30.0
+        );
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("migrated legacy snapshot")));
+        imported.validate().unwrap();
     }
 
     #[test]

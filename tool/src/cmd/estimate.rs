@@ -75,10 +75,19 @@ struct EstimationSequence {
     total_output_time: f64,
     total_travel_time: f64,
     total_extrude_only_time: f64,
+    extruders: BTreeMap<String, ExtruderEstimation>,
     phase_times: EstimationPhaseTimes,
     kind_times: BTreeMap<String, f64>,
     #[serde(serialize_with = "serialize_layer_times")]
     layer_times: BTreeMap<NotNan<f64>, f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+struct ExtruderEstimation {
+    /// Signed filament movement; retractions remain negative.
+    net_distance: f64,
+    extruded_distance: f64,
+    retracted_distance: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
@@ -155,14 +164,27 @@ impl EstimationState {
 
         seq.total_time += m.total_time();
         seq.total_distance += m.distance;
-        seq.total_extrude_distance += m.end.w - m.start.w;
+        let extrusion_delta = m.end.w - m.start.w;
+        seq.total_extrude_distance += extrusion_delta;
+        if m.is_extrude_move() {
+            let extruder = planner.move_extruder_name(m).unwrap_or("unconfigured");
+            let stats = seq.extruders.entry(extruder.into()).or_default();
+            stats.net_distance += extrusion_delta;
+            if extrusion_delta > 0.0 {
+                stats.extruded_distance += extrusion_delta;
+            } else {
+                stats.retracted_distance += extrusion_delta;
+            }
+        }
         seq.num_moves += 1;
         seq.max_speed = Some(seq.max_speed.unwrap_or(0.0).max(m.cruise_v));
 
         match (m.is_extrude_move(), m.is_kinematic_move()) {
             (true, true) => {
                 seq.total_output_time += m.total_time();
-                if let Some(flow_rate) = m.flow_rate(1.75 / 2.0) {
+                if let Some(flow_rate) =
+                    m.flow_rate(planner.move_filament_radius(m).unwrap_or(1.75 / 2.0))
+                {
                     seq.max_flow = Some(seq.max_flow.unwrap_or(0.0).max(flow_rate));
                 }
             }
@@ -256,6 +278,14 @@ impl EstimateCmd {
                         "  Total extrude distance:      {:.3}mm",
                         seq.total_extrude_distance
                     );
+                    for (name, extruder) in &seq.extruders {
+                        println!(
+                            "   {name}: net {:.3}mm, extruded {:.3}mm, retracted {:.3}mm",
+                            extruder.net_distance,
+                            extruder.extruded_distance,
+                            extruder.retracted_distance
+                        );
+                    }
                     println!(
                         "  Minimal time:                {} ({:.3}s)",
                         format_time(seq.total_time),
@@ -501,5 +531,51 @@ impl DumpMovesCmd {
         for diagnostic in planner.diagnostics() {
             eprintln!("{}: {}", diagnostic.command, diagnostic.message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lib_klipper::gcode::parse_gcode;
+    use lib_klipper::planner::{ExtruderLimits, PrinterLimits};
+
+    #[test]
+    fn filament_statistics_keep_sign_and_tool_identity() {
+        let extruder = ExtruderLimits {
+            max_extrude_only_velocity: 100.0,
+            max_extrude_only_accel: 1000.0,
+            ..ExtruderLimits::default()
+        };
+        let limits = PrinterLimits {
+            extruders: BTreeMap::from([
+                ("extruder".into(), extruder.clone()),
+                ("extruder1".into(), extruder),
+            ]),
+            ..PrinterLimits::default()
+        };
+        let mut planner = Planner::from_limits(limits);
+        for line in [
+            "M83",
+            "G1 E5 F600",
+            "G1 E-2 F600",
+            "ACTIVATE_EXTRUDER EXTRUDER=extruder1",
+            "G1 E3 F600",
+        ] {
+            planner.process_cmd(&parse_gcode(line).unwrap());
+        }
+        planner.finalize();
+        let mut state = EstimationState::default();
+        for operation in planner.iter().collect::<Vec<_>>() {
+            state.add(&planner, &operation);
+        }
+
+        let stats = &state.sequences[0].extruders;
+        assert_eq!(stats["extruder"].net_distance, 3.0);
+        assert_eq!(stats["extruder"].extruded_distance, 5.0);
+        assert_eq!(stats["extruder"].retracted_distance, -2.0);
+        assert_eq!(stats["extruder1"].net_distance, 3.0);
+        assert_eq!(stats["extruder1"].extruded_distance, 3.0);
+        assert_eq!(stats["extruder1"].retracted_distance, 0.0);
     }
 }

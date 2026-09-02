@@ -29,7 +29,11 @@ pub enum FirmwareRetractionState {
 }
 
 impl FirmwareRetractionState {
-    pub fn set_options(&self, toolhead_state: &mut ToolheadState, params: &GCodeExtendedParams) {
+    pub fn set_options(
+        &mut self,
+        toolhead_state: &mut ToolheadState,
+        params: &GCodeExtendedParams,
+    ) {
         let settings = &mut toolhead_state.limits.firmware_retraction.as_mut().unwrap();
         if let Some(v) = params.get_number::<f64>("retract_length") {
             settings.retract_length = v.max(0.0);
@@ -46,6 +50,8 @@ impl FirmwareRetractionState {
         if let Some(v) = params.get_number::<f64>("lift_z") {
             settings.lift_z = v.max(0.0);
         }
+        // Klipper's SET_RETRACTION always clears its retracted latch.
+        *self = FirmwareRetractionState::Unretracted;
     }
 
     pub fn retract(
@@ -65,7 +71,7 @@ impl FirmwareRetractionState {
                 let v = toolhead_state.velocity;
                 toolhead_state.velocity = settings.retract_speed;
                 let m = toolhead_state.perform_relative_move(
-                    [None, None, None, Some(retract_length)],
+                    [None, None, None, Some(-retract_length)],
                     Some(kind_tracker.get_kind("Firmware retract")),
                 );
                 op_sequence.add_move(m, toolhead_state);
@@ -109,7 +115,7 @@ impl FirmwareRetractionState {
                 let v = toolhead_state.velocity;
                 toolhead_state.velocity = settings.unretract_speed;
                 let m = toolhead_state.perform_relative_move(
-                    [None, None, None, Some(-*retracted_length)],
+                    [None, None, None, Some(*retracted_length)],
                     Some(kind_tracker.get_kind("Firmware unretract")),
                 );
                 op_sequence.add_move(m, toolhead_state);

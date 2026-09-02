@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
 use crate::arcs::ArcState;
@@ -186,8 +186,21 @@ impl Planner {
                 }
                 "set_retraction" => {
                     let m = &mut self.toolhead_state;
-                    if let Some(fr) = self.firmware_retraction.as_ref() {
+                    if let Some(fr) = self.firmware_retraction.as_mut() {
                         fr.set_options(m, params);
+                    }
+                }
+                "activate_extruder" => {
+                    let name = params.get_string("extruder").unwrap_or("extruder");
+                    match self.toolhead_state.activate_extruder(name) {
+                        Ok(true) => {
+                            self.operations.add_flush_boundary();
+                            return 1;
+                        }
+                        Ok(false) => {}
+                        Err(()) => self
+                            .operations
+                            .add_diagnostic(PlannerDiagnostic::unknown_extruder(name)),
                     }
                 }
                 "set_gcode_offset" => {
@@ -275,8 +288,7 @@ impl Planner {
     fn is_unsupported_state_command(command: &str) -> bool {
         matches!(
             command,
-            "activate_extruder"
-                | "bed_mesh_clear"
+            "bed_mesh_clear"
                 | "bed_mesh_profile"
                 | "restore_dual_carriage_state"
                 | "save_dual_carriage_state"
@@ -366,6 +378,18 @@ impl Planner {
         m.kind.map(|k| self.kind_tracker.resolve_kind(k))
     }
 
+    pub fn move_extruder_name<'a>(&'a self, m: &PlanningMove) -> Option<&'a str> {
+        m.extruder_index()
+            .and_then(|index| self.toolhead_state.limits.extruders.keys().nth(index))
+            .map(String::as_str)
+    }
+
+    pub fn move_filament_radius(&self, m: &PlanningMove) -> Option<f64> {
+        self.move_extruder_name(m)
+            .and_then(|name| self.toolhead_state.limits.extruders.get(name))
+            .map(|limits| limits.filament_diameter * 0.5)
+    }
+
     pub fn kind_str<'a>(&'a self, kind: &Option<Kind>) -> Option<&'a str> {
         kind.map(|k| self.kind_tracker.resolve_kind(k))
     }
@@ -397,9 +421,13 @@ pub enum PlanningOperation {
 #[serde(rename_all = "snake_case")]
 pub enum PlannerDiagnosticCode {
     UnknownSavedGcodeState,
+    UnknownExtruder,
     UnsupportedStateCommand,
     UnsupportedKinematics,
     MoveOutsideKinematicBounds,
+    ExtrudeOnlyMoveTooLong,
+    MoveExceedsMaximumExtrusion,
+    ExtrudeWithoutExtruder,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -424,6 +452,59 @@ impl PlannerDiagnostic {
             command: command.to_ascii_uppercase(),
             message: "parsed state-changing command is not modeled; estimate is a lower bound"
                 .into(),
+        }
+    }
+
+    fn unknown_extruder(name: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnknownExtruder,
+            command: "ACTIVATE_EXTRUDER".into(),
+            message: format!("Klipper has no configured extruder named '{name}'"),
+        }
+    }
+
+    fn invalid_extrusion(
+        violation: ExtruderViolation,
+        move_cmd: &PlanningMove,
+        extruder: Option<(&str, &ExtruderLimits)>,
+    ) -> Self {
+        let tool = extruder.map_or("<none>", |(name, _)| name);
+        let (code, message) = match violation {
+            ExtruderViolation::NoExtruder => (
+                PlannerDiagnosticCode::ExtrudeWithoutExtruder,
+                "Klipper would reject extrusion because no extruder is configured".into(),
+            ),
+            ExtruderViolation::ExtrudeOnlyMoveTooLong => {
+                let limits = extruder
+                    .expect("extrude-only violation requires an extruder")
+                    .1;
+                let distance = move_cmd.delta().w.abs();
+                let maximum = limits.max_extrude_only_distance;
+                (
+                    PlannerDiagnosticCode::ExtrudeOnlyMoveTooLong,
+                    format!(
+                        "Klipper would reject extrude-only move on {tool}: {distance:.6}mm exceeds configured {maximum:.6}mm"
+                    ),
+                )
+            }
+            ExtruderViolation::MaximumCrossSection => {
+                let limits = extruder
+                    .expect("cross-section violation requires an extruder")
+                    .1;
+                let area = move_cmd.rate.w * limits.filament_area();
+                let maximum = limits.max_extrude_cross_section;
+                (
+                    PlannerDiagnosticCode::MoveExceedsMaximumExtrusion,
+                    format!(
+                        "Klipper would reject extrusion on {tool}: {area:.6}mm^2 exceeds configured {maximum:.6}mm^2"
+                    ),
+                )
+            }
+        };
+        Self {
+            code,
+            command: "MOVE".into(),
+            message,
         }
     }
 
@@ -512,6 +593,9 @@ pub struct PlanningMove {
     pub start_v: f64,
     pub cruise_v: f64,
     pub end_v: f64,
+
+    extruder_index: u8,
+    extruder_violation: Option<ExtruderViolation>,
 }
 
 impl PlanningMove {
@@ -549,6 +633,8 @@ impl PlanningMove {
             start_v: 0.0,
             cruise_v: 0.0,
             end_v: 0.0,
+            extruder_index: toolhead_state.active_extruder_index(),
+            extruder_violation: None,
         }
     }
 
@@ -577,6 +663,8 @@ impl PlanningMove {
             start_v: 0.0,
             cruise_v: 0.0,
             end_v: 0.0,
+            extruder_index: toolhead_state.active_extruder_index(),
+            extruder_violation: None,
         }
     }
 
@@ -619,6 +707,10 @@ impl PlanningMove {
 
     pub fn is_kinematic_move(&self) -> bool {
         self.start.xyz() != self.end.xyz()
+    }
+
+    fn extruder_index(&self) -> Option<usize> {
+        (self.extruder_index != u8::MAX).then_some(self.extruder_index as usize)
     }
 
     pub fn is_extrude_move(&self) -> bool {
@@ -733,6 +825,19 @@ impl OperationSequence {
     }
 
     pub(crate) fn add_move(&mut self, mut move_cmd: PlanningMove, toolhead_state: &ToolheadState) {
+        if let Some(violation) = move_cmd.extruder_violation {
+            let extruder = move_cmd.extruder_index().and_then(|index| {
+                toolhead_state
+                    .limits
+                    .extruders
+                    .iter()
+                    .nth(index)
+                    .map(|(name, limits)| (name.as_str(), limits))
+            });
+            self.add_diagnostic(PlannerDiagnostic::invalid_extrusion(
+                violation, &move_cmd, extruder,
+            ));
+        }
         if let Err(violation) = toolhead_state.limits.kinematics.check_move(&mut move_cmd) {
             self.add_diagnostic(PlannerDiagnostic::move_out_of_range(violation));
         }
@@ -976,6 +1081,74 @@ impl MoveSequence {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExtruderViolation {
+    NoExtruder,
+    ExtrudeOnlyMoveTooLong,
+    MaximumCrossSection,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtruderLimits {
+    pub nozzle_diameter: f64,
+    pub filament_diameter: f64,
+    pub max_extrude_only_velocity: f64,
+    pub max_extrude_only_accel: f64,
+    pub max_extrude_only_distance: f64,
+    pub instantaneous_corner_velocity: f64,
+    pub max_extrude_cross_section: f64,
+}
+
+impl Default for ExtruderLimits {
+    fn default() -> Self {
+        Self {
+            nozzle_diameter: 0.4,
+            filament_diameter: 1.75,
+            max_extrude_only_velocity: 100.0,
+            max_extrude_only_accel: 100.0,
+            max_extrude_only_distance: 50.0,
+            instantaneous_corner_velocity: 1.0,
+            max_extrude_cross_section: 0.64,
+        }
+    }
+}
+
+impl ExtruderLimits {
+    fn filament_area(&self) -> f64 {
+        std::f64::consts::PI * (self.filament_diameter * 0.5).powi(2)
+    }
+
+    fn max_extrude_ratio(&self) -> f64 {
+        self.max_extrude_cross_section / self.filament_area()
+    }
+
+    /// Port of `klippy/kinematics/extruder.py:PrinterExtruder.check_move` at
+    /// Klipper f0892d82b0f1c1228454f09eb508eddde2250f4b.
+    fn check_move(&self, move_cmd: &mut PlanningMove) {
+        if !move_cmd.is_extrude_move() {
+            return;
+        }
+        let axis_r = move_cmd.rate.w;
+        let axis_d = move_cmd.delta().w;
+        if (move_cmd.delta().x == 0.0 && move_cmd.delta().y == 0.0) || axis_r < 0.0 {
+            if axis_d.abs() > self.max_extrude_only_distance {
+                move_cmd.extruder_violation = Some(ExtruderViolation::ExtrudeOnlyMoveTooLong);
+            }
+            let inv_extrude_r = 1.0 / axis_r.abs();
+            move_cmd.limit_speed(
+                self.max_extrude_only_velocity * inv_extrude_r,
+                self.max_extrude_only_accel * inv_extrude_r,
+            );
+        } else {
+            let max_ratio = self.max_extrude_ratio();
+            if axis_r > max_ratio && axis_d > self.nozzle_diameter * max_ratio {
+                move_cmd.extruder_violation = Some(ExtruderViolation::MaximumCrossSection);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrinterLimits {
@@ -991,6 +1164,10 @@ pub struct PrinterLimits {
     #[serde(skip)]
     pub mcr_pseudo_accel: f64,
     pub instant_corner_velocity: f64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extruders: BTreeMap<String, ExtruderLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_extruder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_retraction: Option<FirmwareRetractionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1013,6 +1190,8 @@ impl Default for PrinterLimits {
             junction_deviation: Self::scv_to_jd(5.0, 100000.0),
             mcr_pseudo_accel: 50.0,
             instant_corner_velocity: 1.0,
+            extruders: BTreeMap::new(),
+            initial_extruder: None,
             move_checkers: vec![],
             kinematics: Kinematics::Unconfigured,
             firmware_retraction: None,
@@ -1102,6 +1281,8 @@ pub struct ToolheadState {
     pub velocity: f64,
     pub speed_factor: f64,
     pub extrude_factor: f64,
+    active_extruder: Option<String>,
+    extruder_positions: BTreeMap<String, f64>,
     saved_states: HashMap<String, SavedGcodeState>,
 }
 
@@ -1117,9 +1298,44 @@ struct SavedGcodeState {
 }
 
 impl ToolheadState {
-    fn from_limits(limits: PrinterLimits) -> Self {
+    fn from_limits(mut limits: PrinterLimits) -> Self {
+        if limits.extruders.is_empty() {
+            if let Some((max_velocity, max_accel)) =
+                limits
+                    .move_checkers
+                    .iter()
+                    .find_map(|checker| match checker {
+                        MoveChecker::ExtruderLimiter {
+                            max_velocity,
+                            max_accel,
+                        } => Some((*max_velocity, *max_accel)),
+                        _ => None,
+                    })
+            {
+                limits.extruders.insert(
+                    "extruder".into(),
+                    ExtruderLimits {
+                        max_extrude_only_velocity: max_velocity,
+                        max_extrude_only_accel: max_accel,
+                        instantaneous_corner_velocity: limits.instant_corner_velocity,
+                        ..ExtruderLimits::default()
+                    },
+                );
+            }
+        }
         let coordinate_mode = limits.initial_coordinate_mode;
         let extrusion_mode = limits.initial_extrusion_mode;
+        let active_extruder = limits
+            .initial_extruder
+            .as_ref()
+            .filter(|name| limits.extruders.contains_key(*name))
+            .cloned()
+            .or_else(|| limits.extruders.keys().next().cloned());
+        let extruder_positions = limits
+            .extruders
+            .keys()
+            .map(|name| (name.clone(), 0.0))
+            .collect();
         ToolheadState {
             position: Vec4::ZERO,
             base_position: Vec4::ZERO,
@@ -1133,9 +1349,40 @@ impl ToolheadState {
             velocity: limits.max_velocity,
             speed_factor: 1.0 / 60.0,
             extrude_factor: 1.0,
+            active_extruder,
+            extruder_positions,
             saved_states: HashMap::new(),
             limits,
         }
+    }
+
+    pub fn active_extruder(&self) -> Option<&str> {
+        self.active_extruder.as_deref()
+    }
+
+    fn active_extruder_index(&self) -> u8 {
+        self.active_extruder
+            .as_ref()
+            .and_then(|active| self.limits.extruders.keys().position(|name| name == active))
+            .filter(|index| *index < u8::MAX as usize)
+            .map(|index| index as u8)
+            .unwrap_or(u8::MAX)
+    }
+
+    fn activate_extruder(&mut self, name: &str) -> Result<bool, ()> {
+        if self.active_extruder.as_deref() == Some(name) {
+            return Ok(false);
+        }
+        if !self.limits.extruders.contains_key(name) {
+            return Err(());
+        }
+        if let Some(active) = &self.active_extruder {
+            self.extruder_positions
+                .insert(active.clone(), self.position.w);
+        }
+        self.position.w = self.extruder_positions.get(name).copied().unwrap_or(0.0);
+        self.active_extruder = Some(name.into());
+        Ok(true)
     }
 
     pub fn perform_move(&mut self, axes: [Option<f64>; 4]) -> PlanningMove {
@@ -1305,15 +1552,38 @@ impl ToolheadState {
         for checker in &self.limits.move_checkers {
             checker.check(&mut planning_move);
         }
+        if planning_move.is_extrude_move() {
+            match self
+                .active_extruder
+                .as_ref()
+                .and_then(|name| self.limits.extruders.get(name))
+            {
+                Some(extruder) => extruder.check_move(&mut planning_move),
+                None => planning_move.extruder_violation = Some(ExtruderViolation::NoExtruder),
+            }
+        }
         self.position = new_position;
+        if let Some(active) = &self.active_extruder {
+            self.extruder_positions
+                .insert(active.clone(), self.position.w);
+        }
         self.velocity = previous_velocity;
         planning_move
     }
 
     fn extruder_junction_speed_v2(&self, cur_move: &PlanningMove, prev_move: &PlanningMove) -> f64 {
+        if cur_move.extruder_index != prev_move.extruder_index {
+            return 0.0;
+        }
         let diff_r = (cur_move.rate.w - prev_move.rate.w).abs();
         if diff_r > 0.0 {
-            let v = self.limits.instant_corner_velocity / diff_r;
+            let instant_corner_velocity = cur_move
+                .extruder_index()
+                .and_then(|index| self.limits.extruders.values().nth(index))
+                .map_or(self.limits.instant_corner_velocity, |extruder| {
+                    extruder.instantaneous_corner_velocity
+                });
+            let v = instant_corner_velocity / diff_r;
             v * v
         } else {
             cur_move.max_cruise_v2

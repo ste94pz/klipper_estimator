@@ -53,6 +53,16 @@ Generic Cartesian expressions, dual-carriage active state, and other unsupported
 kinematics are not approximated: they degrade snapshot accuracy and emit a
 structured unsupported-kinematics diagnostic.
 
+Each configured extruder has independent motion and extrusion limits. The
+planner tracks tool activation and per-tool E positions, applies Klipper's
+extrude-only rules to retractions and moves without X/Y motion (including Z+E),
+and diagnoses excessive extrusion distance or cross section. Firmware
+retraction is expanded into signed E moves, so per-tool filament statistics do
+not turn retractions into positive output. Runtime snapshots initialize the
+active tool from Moonraker; later `ACTIVATE_EXTRUDER` commands are applied from
+the file. Pressure advance and input shaping remain outside nominal duration
+because they do not change the toolhead move timing in the pinned reference.
+
 ## What is not generally predictable from the file
 
 Klipper macros may inspect live printer state and execute different commands on each run. Heating, homing, probing, filament changes, user pauses, recovery, and network or host delays may also add wall-clock time that is not represented by normal movement commands.

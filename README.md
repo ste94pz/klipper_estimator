@@ -204,6 +204,29 @@ warnings, and produce an `unsupported_kinematics` planner diagnostic. Generic
 Cartesian carriage expressions and active dual-carriage state must be modeled
 before those configurations can be supported safely.
 
+#### Extruders
+
+Every contiguous `[extruderN]` is modeled with its own filament and nozzle
+diameters, extrude-only velocity, acceleration and distance limits, maximum
+cross section, and instantaneous corner velocity. `ACTIVATE_EXTRUDER` switches
+the active limits and restores that tool's independent physical E position, as
+Klipper does. A runtime Moonraker snapshot also uses the currently active
+`toolhead.extruder`; configuration-default and offline snapshots start with
+`extruder`.
+
+Klipper's extrude-only rules are applied to retractions and to any move without
+X/Y motion, including combined Z+E moves. Files that exceed the configured
+extrude-only distance or cross section produce structured diagnostics naming
+the active tool and the rejected limit. Firmware `G10`/`G11` moves retain their
+negative/positive filament direction, and `SET_RETRACTION` resets the firmware
+retraction latch in the same way as Klipper.
+
+Estimate JSON includes signed `net_distance`, positive `extruded_distance`, and
+negative `retracted_distance` statistics under each sequence's `extruders`
+object. Human output reports the same values per tool. Pressure advance and
+input shaping do not change nominal planner duration at the pinned Klipper
+reference and are therefore not added to it.
+
 ### `estimate` mode
 
 Estimation mode is useful for determining statistics about a print, in order to

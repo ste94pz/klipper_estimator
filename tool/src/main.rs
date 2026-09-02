@@ -165,6 +165,7 @@ impl Opts {
             match file_config.clone().try_deserialize::<ConfigSnapshot>() {
                 Ok(mut imported) => {
                     imported.validate()?;
+                    imported.upgrade_legacy_extruders()?;
                     builder = builder.add_source(config::File::from_str(
                         &serde_json::to_string(&imported.limits)?,
                         config::FileFormat::Json,
