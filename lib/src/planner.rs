@@ -6,6 +6,9 @@ pub use crate::firmware_retraction::FirmwareRetractionOptions;
 use crate::firmware_retraction::FirmwareRetractionState;
 use crate::gcode::{GCodeCommand, GCodeOperation};
 use crate::kinematics::{Kinematics, KinematicsChecker, MoveOutOfRange};
+use crate::motion_transform::{
+    calc_skew_factor, MotionTransformConfig, MotionTransformState, SkewFactors,
+};
 
 use crate::kind_tracker::{Kind, KindTracker};
 use glam::Vec4Swizzles;
@@ -23,6 +26,7 @@ pub struct Planner {
 
 impl Planner {
     pub fn from_limits(limits: PrinterLimits) -> Planner {
+        let motion_transforms = MotionTransformState::new(limits.motion_transforms.clone());
         let firmware_retraction = limits
             .firmware_retraction
             .as_ref()
@@ -30,6 +34,9 @@ impl Planner {
         let mut operations = OperationSequence::default();
         if let Some((backend, reason)) = limits.kinematics.unsupported_details() {
             operations.add_diagnostic(PlannerDiagnostic::unsupported_kinematics(backend, reason));
+        }
+        for name in motion_transforms.unsupported_active() {
+            operations.add_diagnostic(PlannerDiagnostic::unsupported_motion_transform(name));
         }
         Planner {
             operations,
@@ -70,7 +77,7 @@ impl Planner {
             if x.is_some() || y.is_some() || z.is_some() || e.is_some() {
                 let mut m = self.toolhead_state.perform_move([*x, *y, *z, *e]);
                 m.kind = move_kind;
-                self.operations.add_move(m, &self.toolhead_state);
+                self.operations.add_move(m, &mut self.toolhead_state);
             } else {
                 self.operations.add_fill();
             }
@@ -218,7 +225,7 @@ impl Planner {
                         move_requested,
                         move_speed,
                     ) {
-                        self.operations.add_move(m, &self.toolhead_state);
+                        self.operations.add_move(m, &mut self.toolhead_state);
                         return 1;
                     }
                 }
@@ -235,13 +242,85 @@ impl Planner {
                         .restore_gcode_state(name, move_requested, move_speed)
                     {
                         Ok(Some(m)) => {
-                            self.operations.add_move(m, &self.toolhead_state);
+                            self.operations.add_move(m, &mut self.toolhead_state);
                             return 1;
                         }
                         Ok(None) => {}
                         Err(()) => self
                             .operations
                             .add_diagnostic(PlannerDiagnostic::unknown_saved_state(name)),
+                    }
+                }
+                "bed_mesh_clear" => {
+                    self.toolhead_state.motion_transforms.clear_bed_mesh();
+                    self.toolhead_state.reset_after_transform_change();
+                }
+                "bed_mesh_profile" => {
+                    if let Some(name) = params.get_string("load") {
+                        if !self.toolhead_state.motion_transforms.load_bed_mesh(name) {
+                            self.operations.add_diagnostic(
+                                PlannerDiagnostic::unknown_motion_transform_profile(
+                                    "BED_MESH_PROFILE",
+                                    name,
+                                ),
+                            );
+                        } else {
+                            self.toolhead_state.reset_after_transform_change();
+                        }
+                    } else {
+                        self.operations.add_diagnostic(
+                            PlannerDiagnostic::unsupported_state_command("bed_mesh_profile"),
+                        );
+                    }
+                }
+                "bed_mesh_offset" => {
+                    self.toolhead_state.motion_transforms.offset_bed_mesh(
+                        params.get_number::<f64>("x"),
+                        params.get_number::<f64>("y"),
+                        params.get_number::<f64>("zfade"),
+                    );
+                    self.toolhead_state.reset_after_transform_change();
+                }
+                "set_skew" => {
+                    let mut factors = self.toolhead_state.motion_transforms.skew();
+                    if params.get_number::<i64>("clear").unwrap_or(0) != 0 {
+                        factors = SkewFactors::default();
+                    } else {
+                        for (name, factor) in [
+                            ("xy", &mut factors.xy),
+                            ("xz", &mut factors.xz),
+                            ("yz", &mut factors.yz),
+                        ] {
+                            if let Some(lengths) = params.get_string(name) {
+                                if let Some(value) = parse_skew_factor(lengths) {
+                                    *factor = value;
+                                } else {
+                                    self.operations.add_diagnostic(
+                                        PlannerDiagnostic::unsupported_state_command("set_skew"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    self.toolhead_state.motion_transforms.set_skew(factors);
+                    self.toolhead_state.reset_after_transform_change();
+                }
+                "skew_profile" => {
+                    if let Some(name) = params.get_string("load") {
+                        if !self.toolhead_state.motion_transforms.load_skew(name) {
+                            self.operations.add_diagnostic(
+                                PlannerDiagnostic::unknown_motion_transform_profile(
+                                    "SKEW_PROFILE",
+                                    name,
+                                ),
+                            );
+                        } else {
+                            self.toolhead_state.reset_after_transform_change();
+                        }
+                    } else {
+                        self.operations.add_diagnostic(
+                            PlannerDiagnostic::unsupported_state_command("skew_profile"),
+                        );
                     }
                 }
                 _ => {}
@@ -288,14 +367,17 @@ impl Planner {
     fn is_unsupported_state_command(command: &str) -> bool {
         matches!(
             command,
-            "bed_mesh_clear"
-                | "bed_mesh_profile"
-                | "restore_dual_carriage_state"
+            "restore_dual_carriage_state"
                 | "save_dual_carriage_state"
                 | "set_dual_carriage"
                 | "set_kinematic_position"
-                | "set_skew"
-                | "skew_profile"
+                | "bed_tilt_calibrate"
+                | "set_z_thermal_adjust"
+                | "tuning_tower"
+                | "exclude_object"
+                | "exclude_object_define"
+                | "exclude_object_start"
+                | "exclude_object_end"
         )
     }
 
@@ -395,6 +477,16 @@ impl Planner {
     }
 }
 
+fn parse_skew_factor(value: &str) -> Option<f64> {
+    let mut lengths = value.split(',').map(str::trim).map(str::parse::<f64>);
+    let factor = calc_skew_factor(
+        lengths.next()?.ok()?,
+        lengths.next()?.ok()?,
+        lengths.next()?.ok()?,
+    )?;
+    (lengths.next().is_none() && factor.is_finite()).then_some(factor)
+}
+
 #[derive(Debug)]
 pub enum Delay {
     Indeterminate(Duration, Option<Kind>),
@@ -424,6 +516,8 @@ pub enum PlannerDiagnosticCode {
     UnknownExtruder,
     UnsupportedStateCommand,
     UnsupportedKinematics,
+    UnsupportedMotionTransform,
+    UnknownMotionTransformProfile,
     MoveOutsideKinematicBounds,
     ExtrudeOnlyMoveTooLong,
     MoveExceedsMaximumExtrusion,
@@ -515,6 +609,22 @@ impl PlannerDiagnostic {
             message: format!(
                 "configured Klipper kinematics '{backend}' is unsupported ({reason}); estimate is a lower bound"
             ),
+        }
+    }
+
+    fn unsupported_motion_transform(name: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnsupportedMotionTransform,
+            command: name.to_ascii_uppercase(),
+            message: "active motion transform is not modeled; estimate is a lower bound".into(),
+        }
+    }
+
+    fn unknown_motion_transform_profile(command: &str, name: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnknownMotionTransformProfile,
+            command: command.into(),
+            message: format!("unknown motion-transform profile: {name}"),
         }
     }
 
@@ -824,7 +934,13 @@ impl OperationSequence {
         self.ops.push_back(OperationSequenceOperation::Delay(delay));
     }
 
-    pub(crate) fn add_move(&mut self, mut move_cmd: PlanningMove, toolhead_state: &ToolheadState) {
+    pub(crate) fn add_move(&mut self, move_cmd: PlanningMove, toolhead_state: &mut ToolheadState) {
+        for mut move_cmd in toolhead_state.transform_move(move_cmd) {
+            self.add_physical_move(&mut move_cmd, toolhead_state);
+        }
+    }
+
+    fn add_physical_move(&mut self, move_cmd: &mut PlanningMove, toolhead_state: &ToolheadState) {
         if let Some(violation) = move_cmd.extruder_violation {
             let extruder = move_cmd.extruder_index().and_then(|index| {
                 toolhead_state
@@ -835,17 +951,17 @@ impl OperationSequence {
                     .map(|(name, limits)| (name.as_str(), limits))
             });
             self.add_diagnostic(PlannerDiagnostic::invalid_extrusion(
-                violation, &move_cmd, extruder,
+                violation, move_cmd, extruder,
             ));
         }
-        if let Err(violation) = toolhead_state.limits.kinematics.check_move(&mut move_cmd) {
+        if let Err(violation) = toolhead_state.limits.kinematics.check_move(move_cmd) {
             self.add_diagnostic(PlannerDiagnostic::move_out_of_range(violation));
         }
         if let Some(OperationSequenceOperation::MoveSequence(ms)) = self.ops.back_mut() {
-            ms.add_move(move_cmd, toolhead_state);
+            ms.add_move(*move_cmd, toolhead_state);
         } else {
             let mut ms = MoveSequence::default();
-            ms.add_move(move_cmd, toolhead_state);
+            ms.add_move(*move_cmd, toolhead_state);
             self.ops
                 .push_back(OperationSequenceOperation::MoveSequence(ms));
         }
@@ -1175,6 +1291,8 @@ pub struct PrinterLimits {
     pub move_checkers: Vec<MoveChecker>,
     #[serde(default, skip_serializing_if = "Kinematics::is_unconfigured")]
     pub kinematics: Kinematics,
+    #[serde(default, skip_serializing_if = "MotionTransformConfig::is_empty")]
+    pub motion_transforms: MotionTransformConfig,
     pub initial_coordinate_mode: PositionMode,
     pub initial_extrusion_mode: PositionMode,
 }
@@ -1194,6 +1312,7 @@ impl Default for PrinterLimits {
             initial_extruder: None,
             move_checkers: vec![],
             kinematics: Kinematics::Unconfigured,
+            motion_transforms: MotionTransformConfig::default(),
             firmware_retraction: None,
             mm_per_arc_segment: None,
             initial_coordinate_mode: PositionMode::Absolute,
@@ -1277,6 +1396,9 @@ pub struct ToolheadState {
     pub homing_position: Vec4,
     pub position_modes: [PositionMode; 4],
     pub limits: PrinterLimits,
+    planner_position: Vec4,
+    planner_has_moved: bool,
+    motion_transforms: MotionTransformState,
 
     pub velocity: f64,
     pub speed_factor: f64,
@@ -1336,6 +1458,8 @@ impl ToolheadState {
             .keys()
             .map(|name| (name.clone(), 0.0))
             .collect();
+        let motion_transforms = MotionTransformState::new(limits.motion_transforms.clone());
+        let planner_position = motion_transforms.transform_position(Vec4::ZERO);
         ToolheadState {
             position: Vec4::ZERO,
             base_position: Vec4::ZERO,
@@ -1353,6 +1477,9 @@ impl ToolheadState {
             extruder_positions,
             saved_states: HashMap::new(),
             limits,
+            planner_position,
+            planner_has_moved: false,
+            motion_transforms,
         }
     }
 
@@ -1381,6 +1508,7 @@ impl ToolheadState {
                 .insert(active.clone(), self.position.w);
         }
         self.position.w = self.extruder_positions.get(name).copied().unwrap_or(0.0);
+        self.planner_position.w = self.position.w;
         self.active_extruder = Some(name.into());
         Ok(true)
     }
@@ -1548,20 +1676,7 @@ impl ToolheadState {
         if let Some(velocity) = requested_velocity {
             self.set_speed(velocity);
         }
-        let mut planning_move = PlanningMove::new(self.position, new_position, self);
-        for checker in &self.limits.move_checkers {
-            checker.check(&mut planning_move);
-        }
-        if planning_move.is_extrude_move() {
-            match self
-                .active_extruder
-                .as_ref()
-                .and_then(|name| self.limits.extruders.get(name))
-            {
-                Some(extruder) => extruder.check_move(&mut planning_move),
-                None => planning_move.extruder_violation = Some(ExtruderViolation::NoExtruder),
-            }
-        }
+        let planning_move = PlanningMove::new(self.position, new_position, self);
         self.position = new_position;
         if let Some(active) = &self.active_extruder {
             self.extruder_positions
@@ -1569,6 +1684,51 @@ impl ToolheadState {
         }
         self.velocity = previous_velocity;
         planning_move
+    }
+
+    fn transform_move(&mut self, logical: PlanningMove) -> Vec<PlanningMove> {
+        if !self.planner_has_moved {
+            self.planner_position = self.motion_transforms.transform_position(logical.start);
+            self.planner_has_moved = true;
+        }
+        let targets = self
+            .motion_transforms
+            .transform_move(logical.start, logical.end);
+        let mut moves = Vec::with_capacity(targets.len());
+        let mut start = self.planner_position;
+        for target in targets {
+            let mut planning_move = PlanningMove::new(start, target, self);
+            planning_move.kind = logical.kind;
+            planning_move.requested_velocity = logical.requested_velocity;
+            planning_move.max_cruise_v2 = logical.requested_velocity * logical.requested_velocity;
+            self.apply_move_checks(&mut planning_move);
+            moves.push(planning_move);
+            start = target;
+        }
+        self.planner_position = start;
+        moves
+    }
+
+    fn reset_after_transform_change(&mut self) {
+        self.position = self
+            .motion_transforms
+            .untransform_position(self.planner_position);
+    }
+
+    fn apply_move_checks(&self, planning_move: &mut PlanningMove) {
+        for checker in &self.limits.move_checkers {
+            checker.check(planning_move);
+        }
+        if planning_move.is_extrude_move() {
+            match self
+                .active_extruder
+                .as_ref()
+                .and_then(|name| self.limits.extruders.get(name))
+            {
+                Some(extruder) => extruder.check_move(planning_move),
+                None => planning_move.extruder_violation = Some(ExtruderViolation::NoExtruder),
+            }
+        }
     }
 
     fn extruder_junction_speed_v2(&self, cur_move: &PlanningMove, prev_move: &PlanningMove) -> f64 {

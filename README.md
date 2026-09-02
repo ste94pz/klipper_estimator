@@ -204,6 +204,32 @@ warnings, and produce an `unsupported_kinematics` planner diagnostic. Generic
 Cartesian carriage expressions and active dual-carriage state must be modeled
 before those configurations can be supported safely.
 
+#### Motion transforms
+
+Saved `[bed_mesh NAME]` profiles are imported from Moonraker snapshots and
+offline Klipper configuration trees. `BED_MESH_PROFILE LOAD=...`,
+`BED_MESH_CLEAR`, and `BED_MESH_OFFSET` update the active transform while the
+file is processed. The planner applies Klipper's mesh interpolation, fade, and
+trajectory splitting before kinematic checks. A runtime snapshot also imports
+the currently active mesh, including an adaptive mesh exposed only through the
+`bed_mesh` status object.
+
+Skew profiles and `SET_SKEW`/`SKEW_PROFILE LOAD=...` are supported. Klipper's
+transform registration order is preserved: skew correction changes X/Y first,
+then bed mesh looks up and splits that corrected trajectory. Profile save or
+remove operations remain explicit unsupported-state diagnostics because they
+mutate session configuration rather than merely selecting a known profile.
+
+Klipper does not expose the active skew factors in its status object, only a
+profile name that may be stale after `SET_SKEW`. Runtime snapshots containing
+`skew_correction` are therefore marked degraded even when a named profile can
+be used as a best available initial value. Active unsupported transforms such
+as `bed_tilt`, `z_thermal_adjust`, or runtime object exclusion likewise degrade
+snapshot accuracy and produce `unsupported_motion_transform` diagnostics.
+Configuration-default and offline snapshots start with bed mesh and skew
+inactive; activation hidden inside a macro cannot be inferred from the print
+file.
+
 #### Extruders
 
 Every contiguous `[extruderN]` is modeled with its own filament and nozzle

@@ -8,6 +8,9 @@ use lib_klipper::kinematics::{
     CartesianKinematics, CartesianKinematicsKind, DeltaKinematics, DeltesianKinematics, Kinematics,
     PolarKinematics, RotaryDeltaKinematics,
 };
+use lib_klipper::motion_transform::{
+    BedMeshConfig, BedMeshProfile, MotionTransformConfig, SkewCorrectionConfig, SkewFactors,
+};
 use lib_klipper::planner::{
     ExtruderLimits, FirmwareRetractionOptions, MoveChecker, PositionMode, PrinterLimits,
 };
@@ -241,6 +244,8 @@ pub enum SnapshotError {
     UnknownActiveExtruder(String),
     #[error("invalid {backend} kinematics geometry: {reason}")]
     InvalidKinematicsGeometry { backend: String, reason: String },
+    #[error("invalid {transform} motion transform: {reason}")]
+    InvalidMotionTransform { transform: String, reason: String },
     #[error("unsupported configuration snapshot schema {0}")]
     UnsupportedSchema(u32),
     #[error("configuration snapshot fingerprint mismatch (expected {expected}, found {actual})")]
@@ -370,7 +375,14 @@ fn requested_objects(available: &BTreeSet<String>) -> BTreeMap<String, Option<Ve
     for name in available.iter().filter(|name| is_extruder_object(name)) {
         objects.insert(name.clone(), None);
     }
-    for optional in ["firmware_retraction", "gcode_arcs"] {
+    for optional in [
+        "firmware_retraction",
+        "gcode_arcs",
+        "bed_mesh",
+        "skew_correction",
+        "z_thermal_adjust",
+        "exclude_object",
+    ] {
         if available.contains(optional) {
             objects.insert(optional.into(), None);
         }
@@ -429,6 +441,10 @@ fn snapshot_from_status(
 
     let toolhead = take_object(&mut status, "toolhead")?;
     let gcode_move = take_object(&mut status, "gcode_move")?;
+    let bed_mesh_runtime = status.remove("bed_mesh");
+    let skew_runtime = status.remove("skew_correction");
+    let z_thermal_runtime = status.remove("z_thermal_adjust");
+    let exclude_object_runtime = status.remove("exclude_object");
     let mut extruder_runtime = BTreeMap::new();
     for name in status
         .keys()
@@ -441,6 +457,14 @@ fn snapshot_from_status(
 
     let extruders = parse_extruders(&configfile_settings)?;
     let mut limits = limits_from_settings(&configfile_settings, &extruders)?;
+    limits.motion_transforms = motion_transforms_from_settings(
+        &configfile_settings,
+        selection,
+        bed_mesh_runtime.as_ref(),
+        skew_runtime.as_ref(),
+        z_thermal_runtime.as_ref(),
+        exclude_object_runtime.as_ref(),
+    )?;
     if selection == SnapshotSelection::RuntimeSnapshot {
         apply_runtime_limits(&mut limits, &toolhead, &gcode_move)?;
     }
@@ -476,6 +500,13 @@ pub(crate) fn apply_kinematics_classification(snapshot: &mut ConfigSnapshot) {
     if let Some((backend, reason)) = snapshot.limits.kinematics.unsupported_details() {
         snapshot.accuracy = SnapshotAccuracy::Degraded;
         let warning = format!("configured Klipper kinematics '{backend}' is unsupported: {reason}");
+        if !snapshot.warnings.contains(&warning) {
+            snapshot.warnings.push(warning);
+        }
+    }
+    for transform in &snapshot.limits.motion_transforms.unsupported_active {
+        snapshot.accuracy = SnapshotAccuracy::Degraded;
+        let warning = format!("active Klipper motion transform '{transform}' is unsupported");
         if !snapshot.warnings.contains(&warning) {
             snapshot.warnings.push(warning);
         }
@@ -683,6 +714,191 @@ fn limits_from_settings(
         .and_then(Value::as_object)
         .and_then(|object| optional_number(object, "resolution"));
     Ok(limits)
+}
+
+fn motion_transforms_from_settings(
+    settings: &BTreeMap<String, Value>,
+    selection: SnapshotSelection,
+    bed_mesh_runtime: Option<&Value>,
+    skew_runtime: Option<&Value>,
+    z_thermal_runtime: Option<&Value>,
+    exclude_object_runtime: Option<&Value>,
+) -> Result<MotionTransformConfig, SnapshotError> {
+    let mut transforms = MotionTransformConfig::default();
+    if let Some(base) = settings.get("bed_mesh").and_then(Value::as_object) {
+        let mut config = BedMeshConfig {
+            fade_start: optional_number(base, "fade_start").unwrap_or(1.0),
+            fade_end: optional_number(base, "fade_end").unwrap_or(0.0),
+            fade_target: optional_number(base, "fade_target"),
+            split_delta_z: optional_number(base, "split_delta_z").unwrap_or(0.025),
+            move_check_distance: optional_number(base, "move_check_distance").unwrap_or(5.0),
+            ..BedMeshConfig::default()
+        };
+        for (section, value) in settings {
+            let Some(name) = section.strip_prefix("bed_mesh ") else {
+                continue;
+            };
+            let object = value.as_object().ok_or_else(|| {
+                SnapshotError::MissingField(format!("configfile.settings.{section}"))
+            })?;
+            if optional_number(object, "version").unwrap_or(0.0) as u64 != 1 {
+                continue;
+            }
+            let points = json_matrix(object.get("points"), &format!("{section}.points"))?;
+            let min = [
+                required_profile_number(object, section, "min_x")?,
+                required_profile_number(object, section, "min_y")?,
+            ];
+            let max = [
+                required_profile_number(object, section, "max_x")?,
+                required_profile_number(object, section, "max_y")?,
+            ];
+            let pps = [
+                required_profile_number(object, section, "mesh_x_pps")? as usize,
+                required_profile_number(object, section, "mesh_y_pps")? as usize,
+            ];
+            let algorithm = object
+                .get("algo")
+                .and_then(Value::as_str)
+                .unwrap_or("lagrange");
+            let tension = optional_number(object, "tension").unwrap_or(0.2);
+            let profile = BedMeshProfile::from_probed(min, max, points, pps, algorithm, tension)
+                .ok_or_else(|| SnapshotError::InvalidMotionTransform {
+                    transform: format!("bed_mesh profile {name}"),
+                    reason: "invalid mesh geometry or interpolation parameters".into(),
+                })?;
+            config.profiles.insert(name.into(), profile);
+        }
+        if selection == SnapshotSelection::RuntimeSnapshot {
+            if let Some(runtime) = bed_mesh_runtime.and_then(Value::as_object) {
+                if let Some(profile) = runtime_bed_mesh(runtime)? {
+                    let name = runtime
+                        .get("profile_name")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or("__runtime__")
+                        .to_string();
+                    config.profiles.insert(name.clone(), profile);
+                    config.initial_profile = Some(name);
+                }
+            }
+        }
+        transforms.bed_mesh = Some(config);
+    }
+
+    if settings.contains_key("skew_correction") {
+        let mut config = SkewCorrectionConfig::default();
+        for (section, value) in settings {
+            let Some(name) = section.strip_prefix("skew_correction ") else {
+                continue;
+            };
+            let object = value.as_object().ok_or_else(|| {
+                SnapshotError::MissingField(format!("configfile.settings.{section}"))
+            })?;
+            config.profiles.insert(
+                name.into(),
+                SkewFactors {
+                    xy: required_profile_number(object, section, "xy_skew")?,
+                    xz: required_profile_number(object, section, "xz_skew")?,
+                    yz: required_profile_number(object, section, "yz_skew")?,
+                },
+            );
+        }
+        if selection == SnapshotSelection::RuntimeSnapshot {
+            let active = skew_runtime
+                .and_then(Value::as_object)
+                .and_then(|runtime| runtime.get("current_profile_name"))
+                .and_then(Value::as_str)
+                .filter(|name| config.profiles.contains_key(*name));
+            config.initial_profile = active.map(str::to_string);
+            transforms
+                .unsupported_active
+                .push("skew_correction runtime factors".into());
+        }
+        transforms.skew_correction = Some(config);
+    }
+
+    if settings.contains_key("bed_tilt") {
+        transforms.unsupported_active.push("bed_tilt".into());
+    }
+    if settings.contains_key("z_thermal_adjust") || z_thermal_runtime.is_some() {
+        transforms
+            .unsupported_active
+            .push("z_thermal_adjust".into());
+    }
+    let exclusion_active = exclude_object_runtime
+        .and_then(Value::as_object)
+        .and_then(|runtime| runtime.get("excluded_objects"))
+        .and_then(Value::as_array)
+        .is_some_and(|objects| !objects.is_empty());
+    if exclusion_active {
+        transforms.unsupported_active.push("exclude_object".into());
+    }
+    Ok(transforms)
+}
+
+fn required_profile_number(
+    object: &serde_json::Map<String, Value>,
+    section: &str,
+    field: &str,
+) -> Result<f64, SnapshotError> {
+    optional_number(object, field).ok_or_else(|| {
+        SnapshotError::MissingField(format!("configfile.settings.{section}.{field}"))
+    })
+}
+
+fn json_pair(value: Option<&Value>, path: &str) -> Result<[f64; 2], SnapshotError> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| SnapshotError::MissingField(path.into()))?;
+    match values.as_slice() {
+        [x, y] => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => Ok([x, y]),
+            _ => Err(SnapshotError::MissingField(path.into())),
+        },
+        _ => Err(SnapshotError::MissingField(path.into())),
+    }
+}
+
+fn json_matrix(value: Option<&Value>, path: &str) -> Result<Vec<Vec<f64>>, SnapshotError> {
+    value
+        .and_then(Value::as_array)
+        .ok_or_else(|| SnapshotError::MissingField(path.into()))?
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .ok_or_else(|| SnapshotError::MissingField(path.into()))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .ok_or_else(|| SnapshotError::MissingField(path.into()))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn runtime_bed_mesh(
+    runtime: &serde_json::Map<String, Value>,
+) -> Result<Option<BedMeshProfile>, SnapshotError> {
+    let matrix = json_matrix(runtime.get("mesh_matrix"), "bed_mesh.mesh_matrix")?;
+    if matrix.len() < 2 || matrix.first().map_or(0, Vec::len) < 2 {
+        return Ok(None);
+    }
+    let profile = BedMeshProfile {
+        min: json_pair(runtime.get("mesh_min"), "bed_mesh.mesh_min")?,
+        max: json_pair(runtime.get("mesh_max"), "bed_mesh.mesh_max")?,
+        matrix,
+    };
+    if profile.is_valid() {
+        Ok(Some(profile))
+    } else {
+        Err(SnapshotError::InvalidMotionTransform {
+            transform: "bed_mesh runtime profile".into(),
+            reason: "invalid mesh bounds or matrix".into(),
+        })
+    }
 }
 
 fn apply_extruder_limits(
@@ -1186,6 +1402,28 @@ pub fn load_offline_snapshot(
     let settings = resolve_offline_settings(&sections)?;
     let extruders = parse_extruders(&settings)?;
     let mut limits = limits_from_settings(&settings, &extruders)?;
+    limits.motion_transforms = motion_transforms_from_settings(
+        &settings,
+        SnapshotSelection::ConfigurationDefault,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    for name in ["bed_tilt", "z_thermal_adjust"] {
+        if sections.contains_key(name)
+            && !limits
+                .motion_transforms
+                .unsupported_active
+                .iter()
+                .any(|active| active == name)
+        {
+            limits
+                .motion_transforms
+                .unsupported_active
+                .push(name.into());
+        }
+    }
     limits.recalculate();
 
     let supported = [
@@ -1202,10 +1440,17 @@ pub fn load_offline_snapshot(
         "stepper_right",
         "firmware_retraction",
         "gcode_arcs",
+        "bed_mesh",
+        "skew_correction",
     ];
     let unsupported: Vec<_> = sections
         .keys()
-        .filter(|name| !supported.contains(&name.as_str()) && !is_extruder_object(name))
+        .filter(|name| {
+            !supported.contains(&name.as_str())
+                && !is_extruder_object(name)
+                && !name.starts_with("bed_mesh ")
+                && !name.starts_with("skew_correction ")
+        })
         .cloned()
         .collect();
     let mut warnings = Vec::new();
@@ -2094,6 +2339,97 @@ fn resolve_offline_settings(
         });
     }
 
+    if let Some(options) = sections.get("bed_mesh") {
+        let mut object = serde_json::Map::new();
+        for (name, default, validator) in [
+            ("fade_start", 1.0, f64::is_finite as fn(f64) -> bool),
+            ("fade_end", 0.0, f64::is_finite),
+            ("split_delta_z", 0.025, |value: f64| value >= 0.01),
+            ("move_check_distance", 5.0, |value: f64| value >= 3.0),
+        ] {
+            object.insert(
+                name.into(),
+                json!(optional_float(
+                    options, "bed_mesh", name, default, validator
+                )?),
+            );
+        }
+        if let Some(value) = options.get("fade_target") {
+            object.insert(
+                "fade_target".into(),
+                json!(parse_float(
+                    "bed_mesh",
+                    "fade_target",
+                    value,
+                    f64::is_finite
+                )?),
+            );
+        }
+        resolved.insert("bed_mesh".into(), Value::Object(object));
+    }
+    for (section, options) in sections
+        .iter()
+        .filter(|(name, _)| name.starts_with("bed_mesh "))
+    {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "version".into(),
+            json!(required_float(options, section, "version", |value| value == 1.0)?),
+        );
+        object.insert(
+            "points".into(),
+            json!(offline_matrix(
+                options
+                    .get("points")
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: section.clone(),
+                        option: "points".into(),
+                    })?,
+                section,
+            )?),
+        );
+        for name in ["min_x", "max_x", "min_y", "max_y", "tension"] {
+            object.insert(
+                name.into(),
+                json!(required_float(options, section, name, f64::is_finite)?),
+            );
+        }
+        for name in ["x_count", "y_count", "mesh_x_pps", "mesh_y_pps"] {
+            object.insert(
+                name.into(),
+                json!(required_float(options, section, name, |value| {
+                    value >= 0.0 && value.fract() == 0.0
+                })?),
+            );
+        }
+        object.insert(
+            "algo".into(),
+            json!(options
+                .get("algo")
+                .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                    section: section.clone(),
+                    option: "algo".into(),
+                })?),
+        );
+        resolved.insert(section.clone(), Value::Object(object));
+    }
+    if sections.contains_key("skew_correction") {
+        resolved.insert("skew_correction".into(), json!({}));
+    }
+    for (section, options) in sections
+        .iter()
+        .filter(|(name, _)| name.starts_with("skew_correction "))
+    {
+        let mut object = serde_json::Map::new();
+        for name in ["xy_skew", "xz_skew", "yz_skew"] {
+            object.insert(
+                name.into(),
+                json!(required_float(options, section, name, f64::is_finite)?),
+            );
+        }
+        resolved.insert(section.clone(), Value::Object(object));
+    }
+
     if let Some(options) = sections.get("firmware_retraction") {
         let mut object = serde_json::Map::new();
         for (name, default, validator) in [
@@ -2126,6 +2462,41 @@ fn resolve_offline_settings(
 
 fn nonnegative(value: f64) -> bool {
     value >= 0.0
+}
+
+fn offline_matrix(value: &str, section: &str) -> Result<Vec<Vec<f64>>, SnapshotError> {
+    let rows: Vec<Vec<f64>> = value
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| SnapshotError::OfflineValue {
+                            section: section.into(),
+                            option: "points".into(),
+                            value: value.into(),
+                            message: "expected a rectangular matrix of finite numbers".into(),
+                        })
+                })
+                .collect()
+        })
+        .collect::<Result<_, _>>()?;
+    let width = rows.first().map_or(0, Vec::len);
+    if rows.len() < 2 || width < 2 || rows.iter().any(|row| row.len() != width) {
+        return Err(SnapshotError::OfflineValue {
+            section: section.into(),
+            option: "points".into(),
+            value: value.into(),
+            message: "expected a rectangular matrix with at least two rows and columns".into(),
+        });
+    }
+    Ok(rows)
 }
 
 fn at_least_one(value: f64) -> bool {
@@ -2410,6 +2781,117 @@ mod tests {
         let extruders = parse_extruders(&dual_carriage_settings).unwrap();
         let limits = limits_from_settings(&dual_carriage_settings, &extruders).unwrap();
         assert!(matches!(limits.kinematics, Kinematics::Unsupported { .. }));
+    }
+
+    #[test]
+    fn motion_transform_profiles_and_runtime_state_are_imported() {
+        let mut status = status();
+        let settings = status
+            .get_mut("configfile")
+            .and_then(Value::as_object_mut)
+            .and_then(|configfile| configfile.get_mut("settings"))
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        settings.insert(
+            "bed_mesh".into(),
+            json!({
+                "fade_start": 1.0,
+                "fade_end": 0.0,
+                "split_delta_z": 0.025,
+                "move_check_distance": 5.0
+            }),
+        );
+        settings.insert(
+            "bed_mesh saved".into(),
+            json!({
+                "version": 1,
+                "points": [[0.0, 0.1], [-0.1, 0.05]],
+                "min_x": 0.0,
+                "max_x": 100.0,
+                "min_y": 0.0,
+                "max_y": 100.0,
+                "x_count": 2,
+                "y_count": 2,
+                "mesh_x_pps": 0,
+                "mesh_y_pps": 0,
+                "algo": "direct",
+                "tension": 0.2
+            }),
+        );
+        settings.insert("skew_correction".into(), json!({}));
+        settings.insert(
+            "skew_correction calibrated".into(),
+            json!({ "xy_skew": 0.01, "xz_skew": -0.02, "yz_skew": 0.03 }),
+        );
+        status.insert(
+            "bed_mesh".into(),
+            json!({
+                "profile_name": "saved",
+                "mesh_min": [0.0, 0.0],
+                "mesh_max": [100.0, 100.0],
+                "mesh_matrix": [[0.0, 0.1], [-0.1, 0.05]]
+            }),
+        );
+        status.insert(
+            "skew_correction".into(),
+            json!({ "current_profile_name": "calibrated" }),
+        );
+
+        let default_snapshot = snapshot_from_status(
+            "http://printer.local",
+            SnapshotSelection::ConfigurationDefault,
+            None,
+            status.clone(),
+        )
+        .unwrap();
+        let default_transforms = &default_snapshot.limits.motion_transforms;
+        assert_eq!(default_snapshot.accuracy, SnapshotAccuracy::Complete);
+        assert_eq!(
+            default_transforms
+                .bed_mesh
+                .as_ref()
+                .unwrap()
+                .initial_profile,
+            None
+        );
+        assert!(default_transforms
+            .bed_mesh
+            .as_ref()
+            .unwrap()
+            .profiles
+            .contains_key("saved"));
+
+        let runtime_snapshot = snapshot_from_status(
+            "http://printer.local",
+            SnapshotSelection::RuntimeSnapshot,
+            None,
+            status,
+        )
+        .unwrap();
+        let runtime_transforms = &runtime_snapshot.limits.motion_transforms;
+        assert_eq!(
+            runtime_transforms
+                .bed_mesh
+                .as_ref()
+                .unwrap()
+                .initial_profile
+                .as_deref(),
+            Some("saved")
+        );
+        assert_eq!(
+            runtime_transforms
+                .skew_correction
+                .as_ref()
+                .unwrap()
+                .initial_profile
+                .as_deref(),
+            Some("calibrated")
+        );
+        assert_eq!(runtime_snapshot.accuracy, SnapshotAccuracy::Degraded);
+        assert!(runtime_snapshot
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("runtime factors")));
     }
 
     #[test]
@@ -2852,7 +3334,24 @@ max_velocity: 250
                 .retract_length,
             0.8
         );
+        assert!(offline.limits.motion_transforms.bed_mesh.is_some());
         assert!(offline
+            .limits
+            .motion_transforms
+            .bed_mesh
+            .as_ref()
+            .unwrap()
+            .profiles
+            .contains_key("saved"));
+        assert!(offline
+            .limits
+            .motion_transforms
+            .skew_correction
+            .as_ref()
+            .unwrap()
+            .profiles
+            .contains_key("calibrated"));
+        assert!(!offline
             .warnings
             .iter()
             .any(|warning| warning.contains("bed_mesh")));

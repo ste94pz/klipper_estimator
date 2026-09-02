@@ -53,6 +53,22 @@ Generic Cartesian expressions, dual-carriage active state, and other unsupported
 kinematics are not approximated: they degrade snapshot accuracy and emit a
 structured unsupported-kinematics diagnostic.
 
+Saved bed-mesh profiles are part of the resolved configuration. A
+configuration-default or offline estimate starts with no active profile and
+tracks `BED_MESH_PROFILE`, `BED_MESH_CLEAR`, and `BED_MESH_OFFSET` commands in
+the file. A runtime snapshot instead imports the active `bed_mesh` matrix. Mesh
+interpolation, fade, and move splitting are applied before kinematic limits.
+Skew correction is applied before bed mesh, matching Klipper's transform-chain
+order, and can be selected from a saved profile or changed with `SET_SKEW`.
+
+Runtime Klipper status exposes only the skew profile name, not the effective
+factors, so a runtime snapshot with skew correction is explicitly degraded.
+Other active transforms that cannot yet be reproduced, including bed tilt,
+thermal Z adjustment, and active object exclusion, also degrade the snapshot
+and emit a structured diagnostic instead of being treated as identity
+transforms. A profile loaded only inside an unexpanded macro remains unknown to
+the estimator.
+
 Each configured extruder has independent motion and extrusion limits. The
 planner tracks tool activation and per-tool E positions, applies Klipper's
 extrude-only rules to retractions and moves without X/Y motion (including Z+E),

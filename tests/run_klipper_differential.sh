@@ -44,3 +44,10 @@ KLIPPER_PATH="$klipper_path" cargo test \
     --test extruder_differential \
     extruder_limits_match_pinned_klipper \
     -- --exact
+
+KLIPPER_PATH="$klipper_path" cargo test \
+    --manifest-path "$repository_root/Cargo.toml" \
+    -p lib_klipper \
+    --test motion_transform_differential \
+    bed_mesh_path_and_duration_match_pinned_klipper \
+    -- --exact
