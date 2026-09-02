@@ -11,6 +11,16 @@ is useful for repeatable or offline estimates: it records the Klipper version,
 retrieval time, effective limits, resolved settings, source mode, and a stable
 fingerprint.
 
+When Moonraker is unavailable, the estimator can resolve a Klipper
+configuration tree within an explicitly declared root. This mode follows
+Klipper's include ordering and `SAVE_CONFIG` precedence and resolves only the
+defaults used by currently supported estimator features. Missing, cyclic, or
+out-of-root includes fail instead of producing a partial estimate. Sections
+whose behavior is not modeled are named in snapshot warnings; no limits are
+invented for them. An equivalent set of effective supported settings produces
+the same fingerprint as a configuration-default Moonraker snapshot when the
+Klipper-version provenance is also equivalent.
+
 Configuration-default and runtime-snapshot estimates answer different
 questions. The default uses values resolved from `configfile.settings` and is
 stable across transient `SET_VELOCITY_LIMIT` or G-code-state changes. An

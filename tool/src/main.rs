@@ -11,8 +11,8 @@ mod cmd;
 mod config_snapshot;
 
 use config_snapshot::{
-    fetch_moonraker_snapshot, map_auth_error, read_cache, write_cache, ConfigSnapshot,
-    SnapshotAccuracy, SnapshotSelection, SnapshotSource, SnapshotSourceKind,
+    fetch_moonraker_snapshot, load_offline_snapshot, map_auth_error, read_cache, write_cache,
+    ConfigSnapshot, SnapshotAccuracy, SnapshotSelection, SnapshotSource, SnapshotSourceKind,
 };
 
 #[derive(Parser, Debug)]
@@ -32,6 +32,21 @@ pub struct Opts {
         default_value_t = SnapshotSelection::ConfigurationDefault
     )]
     config_moonraker_mode: SnapshotSelection,
+
+    /// Klipper root configuration, relative to --config_klipper_root
+    #[clap(
+        long = "config_klipper_file",
+        requires = "config-klipper-root",
+        conflicts_with = "config-moonraker"
+    )]
+    config_klipper_file: Option<String>,
+    /// Directory that confines the root configuration and all of its includes
+    #[clap(
+        long = "config_klipper_root",
+        requires = "config-klipper-file",
+        conflicts_with = "config-moonraker"
+    )]
+    config_klipper_root: Option<String>,
 
     #[clap(long = "config_file")]
     config_filename: Option<String>,
@@ -94,7 +109,16 @@ impl Opts {
     fn load_config(&self) -> anyhow::Result<ConfigSnapshot> {
         use config::Config;
 
-        let mut snapshot = if let Some(url) = &self.config_moonraker {
+        let mut snapshot = if let (Some(root), Some(filename)) =
+            (&self.config_klipper_root, &self.config_klipper_file)
+        {
+            if self.config_moonraker_mode != SnapshotSelection::ConfigurationDefault {
+                anyhow::bail!(
+                    "offline Klipper configuration supports only configuration-default mode"
+                );
+            }
+            load_offline_snapshot(root, filename)?
+        } else if let Some(url) = &self.config_moonraker {
             match fetch_moonraker_snapshot(
                 url,
                 self.config_moonraker_api_key.as_deref(),

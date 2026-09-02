@@ -48,8 +48,8 @@ In order to provide accurate times, `klipper_estimator` needs printer settings
 including maximum velocity, acceleration, etc. It can take these either from a
 config file (`--config_file`) or grab them directly from Moonraker
 (`--config_moonraker_url` and, if authentication is required,
-`--config_moonraker_api_key`). Note that the Klipper configuration files cannot
-be used directly.
+`--config_moonraker_api_key`). It can also resolve a Klipper configuration tree
+offline with `--config_klipper_root` and `--config_klipper_file`.
 
 Moonraker configuration is stored as a versioned snapshot. A snapshot records
 its source, retrieval time, Klipper version, resolved `configfile.settings`,
@@ -63,6 +63,32 @@ resolved configuration defaults while retaining runtime objects as provenance.
 Use `--config_moonraker_mode runtime-snapshot` explicitly to apply the current
 runtime velocity limits and G-code coordinate modes. Runtime snapshots are not
 loaded from the Moonraker cache because those overrides would be stale.
+
+For an offline printer configuration, declare both the directory that confines
+all configuration access and the root file relative to that directory:
+
+```
+$ ./klipper_estimator \
+    --config_klipper_root /home/pi/printer_data/config \
+    --config_klipper_file printer.cfg \
+    dump-config > config.json
+```
+
+Offline loading follows Klipper's linear include order, including sorted `*`,
+`?`, and character-class glob matches, and applies a valid generated
+`SAVE_CONFIG` block after regular configuration. A saved option does not
+override the same option in the root file or an include, matching Klipper.
+Missing or cyclic includes, malformed values, corrupted generated blocks, and
+paths or symlinks escaping the declared root are rejected. Wildcard includes
+are allowed to match no files, as in Klipper.
+
+The resulting snapshot has source `offline_configuration` and selection
+`configuration_default`. It resolves the Klipper defaults currently consumed
+by the estimator for `[printer]`, every contiguous `[extruderN]`,
+`[firmware_retraction]`, and `[gcode_arcs]`. Other sections are listed in the
+snapshot warnings and are not assigned guessed values. A live Moonraker
+snapshot remains preferable when available because Klipper itself then
+provides all resolved settings and its version.
 
 To experiment with settings, use `dump-config` together with
 `--config_moonraker_url` to export a complete snapshot. The result can be
