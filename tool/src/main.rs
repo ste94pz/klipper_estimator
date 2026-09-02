@@ -13,9 +13,9 @@ mod config_snapshot;
 mod duration;
 
 use config_snapshot::{
+    ConfigSnapshot, SnapshotAccuracy, SnapshotSelection, SnapshotSource, SnapshotSourceKind,
     apply_kinematics_classification, apply_klipper_compatibility, fetch_moonraker_snapshot,
-    load_offline_snapshot, map_auth_error, read_cache, write_cache, ConfigSnapshot,
-    SnapshotAccuracy, SnapshotSelection, SnapshotSource, SnapshotSourceKind,
+    load_offline_snapshot, map_auth_error, read_cache, write_cache,
 };
 
 #[derive(Parser, Debug)]
@@ -133,10 +133,10 @@ impl Opts {
                 self.config_moonraker_mode,
             ) {
                 Ok(snapshot) => {
-                    if let Some(cache_file) = self.config_moonraker_cache_file.as_deref() {
-                        if let Err(error) = write_cache(cache_file, &snapshot) {
-                            eprintln!("Could not write Moonraker cache: {error}");
-                        }
+                    if let Some(cache_file) = self.config_moonraker_cache_file.as_deref()
+                        && let Err(error) = write_cache(cache_file, &snapshot)
+                    {
+                        eprintln!("Could not write Moonraker cache: {error}");
                     }
                     snapshot
                 }
@@ -169,7 +169,8 @@ impl Opts {
             let file_config = Config::builder()
                 .add_source(config::File::new(filename, config::FileFormat::Json5))
                 .build()?;
-            match file_config.clone().try_deserialize::<ConfigSnapshot>() {
+            let imported_snapshot = file_config.clone().try_deserialize::<ConfigSnapshot>();
+            match imported_snapshot {
                 Ok(mut imported) => {
                     imported.validate()?;
                     imported.upgrade_legacy_extruders()?;

@@ -229,14 +229,15 @@ impl<R: BufRead> Iterator for GCodeReader<R> {
     }
 }
 
-pub use parser::parse_gcode;
 pub use parser::GCodeParseError;
+pub use parser::parse_gcode;
 
 mod parser {
     #![allow(clippy::many_single_char_names)]
 
     use super::*;
     use nom::{
+        Err, IResult, Parser, Slice,
         branch::alt,
         bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
         character::complete::{char, satisfy, space0, space1},
@@ -244,7 +245,6 @@ mod parser {
         error::{Error, ErrorKind, ParseError},
         multi::separated_list0,
         sequence::tuple,
-        Err, IResult, Parser, Slice,
     };
     use std::borrow::Cow;
 

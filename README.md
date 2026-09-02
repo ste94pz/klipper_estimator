@@ -502,9 +502,9 @@ benchmark is documented in `benchmarks/README.md`.
 
 ## Building
 
-`klipper_estimator` is written in Rust. Version 1.58 or newer is required to
-compile the tool. Assuming a Rust toolchain is installed, along with git, one
-can build `klipper_estimator` by running:
+`klipper_estimator` is written in Rust 2024 and requires Rust 1.98.0. Both
+crates, local development, CI, and release builds use that baseline. Assuming
+Rust 1.98.0 and Git are installed, build `klipper_estimator` by running:
 
 ```
 $ git clone https://github.com/ste94pz/klipper_estimator.git

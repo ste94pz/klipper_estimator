@@ -7,7 +7,7 @@ use crate::firmware_retraction::FirmwareRetractionState;
 use crate::gcode::{GCodeCommand, GCodeOperation};
 use crate::kinematics::{Kinematics, KinematicsChecker, MoveOutOfRange};
 use crate::motion_transform::{
-    calc_skew_factor, MotionTransformConfig, MotionTransformState, SkewFactors,
+    MotionTransformConfig, MotionTransformState, SkewFactors, calc_skew_factor,
 };
 
 use crate::kind_tracker::{Kind, KindTracker};
@@ -52,34 +52,33 @@ impl Planner {
     /// open move sequence.
     /// Returns the number of planning operations the command resulted in
     pub fn process_cmd(&mut self, cmd: &GCodeCommand) -> usize {
-        if let Some(command) = Self::command_name(cmd) {
-            if let Some(contract) = self
+        if let Some(command) = Self::command_name(cmd)
+            && let Some(contract) = self
                 .toolhead_state
                 .limits
                 .command_contracts
                 .get(&command)
                 .cloned()
-            {
-                if !contract.duration.is_finite() || contract.duration < 0.0 {
-                    self.operations
-                        .add_diagnostic(PlannerDiagnostic::invalid_duration_contract(&command));
-                    self.operations.add_delay(Delay::Unknown {
-                        command: command.to_ascii_uppercase(),
-                        category: contract.category.unknown_category(),
-                    });
-                    return 1;
-                }
-                if let Err(name) = self.toolhead_state.apply_contract_state(&contract.state) {
-                    self.operations
-                        .add_diagnostic(PlannerDiagnostic::unknown_extruder(&name));
-                }
-                self.operations.add_delay(Delay::Contract {
-                    duration: Duration::from_secs_f64(contract.duration),
+        {
+            if !contract.duration.is_finite() || contract.duration < 0.0 {
+                self.operations
+                    .add_diagnostic(PlannerDiagnostic::invalid_duration_contract(&command));
+                self.operations.add_delay(Delay::Unknown {
                     command: command.to_ascii_uppercase(),
-                    category: contract.category,
+                    category: contract.category.unknown_category(),
                 });
                 return 1;
             }
+            if let Err(name) = self.toolhead_state.apply_contract_state(&contract.state) {
+                self.operations
+                    .add_diagnostic(PlannerDiagnostic::unknown_extruder(&name));
+            }
+            self.operations.add_delay(Delay::Contract {
+                duration: Duration::from_secs_f64(contract.duration),
+                command: command.to_ascii_uppercase(),
+                category: contract.category,
+            });
+            return 1;
         }
         if Self::is_unsupported_traditional_state_command(cmd) {
             self.operations.add_diagnostic(PlannerDiagnostic {
@@ -1628,8 +1627,8 @@ struct SavedGcodeState {
 
 impl ToolheadState {
     fn from_limits(mut limits: PrinterLimits) -> Self {
-        if limits.extruders.is_empty() {
-            if let Some((max_velocity, max_accel)) =
+        if limits.extruders.is_empty()
+            && let Some((max_velocity, max_accel)) =
                 limits
                     .move_checkers
                     .iter()
@@ -1640,17 +1639,16 @@ impl ToolheadState {
                         } => Some((*max_velocity, *max_accel)),
                         _ => None,
                     })
-            {
-                limits.extruders.insert(
-                    "extruder".into(),
-                    ExtruderLimits {
-                        max_extrude_only_velocity: max_velocity,
-                        max_extrude_only_accel: max_accel,
-                        instantaneous_corner_velocity: limits.instant_corner_velocity,
-                        ..ExtruderLimits::default()
-                    },
-                );
-            }
+        {
+            limits.extruders.insert(
+                "extruder".into(),
+                ExtruderLimits {
+                    max_extrude_only_velocity: max_velocity,
+                    max_extrude_only_accel: max_accel,
+                    instantaneous_corner_velocity: limits.instant_corner_velocity,
+                    ..ExtruderLimits::default()
+                },
+            );
         }
         let coordinate_mode = limits.initial_coordinate_mode;
         let extrusion_mode = limits.initial_extrusion_mode;
@@ -1695,10 +1693,10 @@ impl ToolheadState {
     }
 
     fn apply_contract_state(&mut self, state: &ContractState) -> Result<(), String> {
-        if let Some(extruder) = state.active_extruder.as_deref() {
-            if !self.limits.extruders.contains_key(extruder) {
-                return Err(extruder.to_string());
-            }
+        if let Some(extruder) = state.active_extruder.as_deref()
+            && !self.limits.extruders.contains_key(extruder)
+        {
+            return Err(extruder.to_string());
         }
         if let Some(mode) = state.coordinate_mode {
             self.position_modes[..3].fill(mode);

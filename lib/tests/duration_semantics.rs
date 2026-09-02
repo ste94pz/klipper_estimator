@@ -76,8 +76,10 @@ fn unknown_waits_and_macros_are_omitted_instead_of_receiving_fake_time() {
             category: UnknownDurationCategory::CommandOrMacro,
         }) if command == "PRINT_START"
     )));
-    assert!(planner
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == PlannerDiagnosticCode::UnknownDuration));
+    assert!(
+        planner
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == PlannerDiagnosticCode::UnknownDuration)
+    );
 }

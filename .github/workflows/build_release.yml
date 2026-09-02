@@ -61,15 +61,11 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: 1.98.0
           target: ${{ matrix.target }}
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --target ${{ matrix.target }} --release
+      - run: cargo build --target ${{ matrix.target }} --release
       - name: Rename asset
         run: mv target/${{ matrix.target }}/release/${{ matrix.raw_name }} target/${{ matrix.asset_name }}
       - name: Release

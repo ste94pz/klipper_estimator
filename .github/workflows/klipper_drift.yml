@@ -20,6 +20,8 @@ jobs:
           ref: f0892d82b0f1c1228454f09eb508eddde2250f4b
           path: klipper-reference
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
       - run: KLIPPER_PATH="$GITHUB_WORKSPACE/klipper-reference" bash tests/run_klipper_differential.sh
 
@@ -33,6 +35,8 @@ jobs:
           repository: Klipper3d/klipper
           path: klipper-reference
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Compare current Klipper with estimator fixtures
         env:

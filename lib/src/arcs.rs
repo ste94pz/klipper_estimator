@@ -205,18 +205,10 @@ pub enum ArcDirection {
     CounterClockwise,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub enum Plane {
+    #[default]
     XY,
     XZ,
     YZ,
-}
-
-// Keep the manual implementation compatible with the documented Rust 1.58 MSRV;
-// `#[default]` on enum variants was stabilized later.
-#[allow(clippy::derivable_impls)]
-impl Default for Plane {
-    fn default() -> Self {
-        Self::XY
-    }
 }

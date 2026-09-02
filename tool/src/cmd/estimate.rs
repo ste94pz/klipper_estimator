@@ -8,12 +8,12 @@ use lib_klipper::planner::{Delay, Planner, PlannerDiagnostic, PlanningMove, Plan
 
 use clap::Parser;
 use ordered_float::NotNan;
-use serde::{ser::SerializeSeq, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeSeq};
 
-use crate::calibration::{fetch_history_calibration, CalibrationReport};
+use crate::Opts;
+use crate::calibration::{CalibrationReport, fetch_history_calibration};
 use crate::config_snapshot::{ConfigSnapshot, ConfigSnapshotSummary, SnapshotAccuracy};
 use crate::duration::DurationEstimate;
-use crate::Opts;
 
 fn format_time(mut seconds: f64) -> String {
     let mut parts = Vec::new();

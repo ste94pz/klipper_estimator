@@ -8,14 +8,14 @@ use clap::Parser;
 use regex::Regex;
 
 use lib_klipper::gcode::{
-    parse_gcode, GCodeCommand, GCodeOperation, GCodeReader, GCodeTraditionalParams,
+    GCodeCommand, GCodeOperation, GCodeReader, GCodeTraditionalParams, parse_gcode,
 };
 use lib_klipper::planner::Planner;
 use lib_klipper::slicer::SlicerPreset;
 
-use crate::calibration::{fingerprint_reader, CalibrationMarker, CALIBRATION_MARKER_PREFIX};
-use crate::duration::DurationEstimate;
 use crate::Opts;
+use crate::calibration::{CALIBRATION_MARKER_PREFIX, CalibrationMarker, fingerprint_reader};
+use crate::duration::DurationEstimate;
 
 #[derive(Parser, Debug)]
 pub struct PostProcessCmd {
@@ -148,17 +148,17 @@ impl GCodeInterceptor for PSSSGCodeInterceptor {
             return Some(cmd);
         }
 
-        if let Some(com) = &command.comment {
-            if let Some(c) = RE_EST_TIME.captures(com) {
-                return Some(GCodeCommand {
-                    op: GCodeOperation::Nop,
-                    comment: Some(format!(
-                        "{}{}",
-                        c.get(0).unwrap().as_str(),
-                        Self::format_dhms(result.total_time)
-                    )),
-                });
-            }
+        if let Some(com) = &command.comment
+            && let Some(c) = RE_EST_TIME.captures(com)
+        {
+            return Some(GCodeCommand {
+                op: GCodeOperation::Nop,
+                comment: Some(format!(
+                    "{}{}",
+                    c.get(0).unwrap().as_str(),
+                    Self::format_dhms(result.total_time)
+                )),
+            });
         }
 
         None
@@ -172,10 +172,10 @@ struct IdeaMakerGCodeInterceptor {
 
 impl GCodeInterceptor for IdeaMakerGCodeInterceptor {
     fn post_command(&mut self, command: &GCodeCommand, result: &mut PostProcessEstimationResult) {
-        if let Some(com) = &command.comment {
-            if com.starts_with("PRINTING_TIME: ") {
-                self.time_buffer.push_back(result.total_time);
-            }
+        if let Some(com) = &command.comment
+            && com.starts_with("PRINTING_TIME: ")
+        {
+            self.time_buffer.push_back(result.total_time);
         }
     }
 
@@ -197,16 +197,16 @@ impl GCodeInterceptor for IdeaMakerGCodeInterceptor {
                         comment: Some(format!("PRINTING_TIME: {:.0}", next.ceil())),
                     });
                 }
-            } else if com.starts_with("REMAINING_TIME: ") {
-                if let Some(next) = self.time_buffer.pop_front() {
-                    return Some(GCodeCommand {
-                        op: GCodeOperation::Nop,
-                        comment: Some(format!(
-                            "REMAINING_TIME: {:.0}",
-                            (result.total_time - next).ceil()
-                        )),
-                    });
-                }
+            } else if com.starts_with("REMAINING_TIME: ")
+                && let Some(next) = self.time_buffer.pop_front()
+            {
+                return Some(GCodeCommand {
+                    op: GCodeOperation::Nop,
+                    comment: Some(format!(
+                        "REMAINING_TIME: {:.0}",
+                        (result.total_time - next).ceil()
+                    )),
+                });
             }
         }
         None
@@ -220,10 +220,10 @@ struct CuraGCodeInterceptor {
 
 impl GCodeInterceptor for CuraGCodeInterceptor {
     fn post_command(&mut self, command: &GCodeCommand, result: &mut PostProcessEstimationResult) {
-        if let Some(com) = &command.comment {
-            if com.starts_with("TIME_ELAPSED:") {
-                self.time_buffer.push_back(result.total_time);
-            }
+        if let Some(com) = &command.comment
+            && com.starts_with("TIME_ELAPSED:")
+        {
+            self.time_buffer.push_back(result.total_time);
         }
     }
 
@@ -243,13 +243,13 @@ impl GCodeInterceptor for CuraGCodeInterceptor {
                     op: GCodeOperation::Nop,
                     comment: Some(format!("PRINT.TIME:{:.0}", result.total_time.ceil())),
                 });
-            } else if com.starts_with("TIME_ELAPSED:") {
-                if let Some(next) = self.time_buffer.pop_front() {
-                    return Some(GCodeCommand {
-                        op: GCodeOperation::Nop,
-                        comment: Some(format!("TIME_ELAPSED:{:.0}", (next).ceil())),
-                    });
-                }
+            } else if com.starts_with("TIME_ELAPSED:")
+                && let Some(next) = self.time_buffer.pop_front()
+            {
+                return Some(GCodeCommand {
+                    op: GCodeOperation::Nop,
+                    comment: Some(format!("TIME_ELAPSED:{:.0}", (next).ceil())),
+                });
             }
         }
         None
@@ -286,16 +286,16 @@ impl GCodeInterceptor for Simplify3DGCodeInterceptor {
         command: &GCodeCommand,
         result: &PostProcessEstimationResult,
     ) -> Option<GCodeCommand> {
-        if let Some(com) = &command.comment {
-            if com.starts_with("   Build Time: ") {
-                return Some(GCodeCommand {
-                    op: GCodeOperation::Nop,
-                    comment: Some(format!(
-                        "   Build Time:{}",
-                        Self::format_dhms(result.total_time.ceil())
-                    )),
-                });
-            }
+        if let Some(com) = &command.comment
+            && com.starts_with("   Build Time: ")
+        {
+            return Some(GCodeCommand {
+                op: GCodeOperation::Nop,
+                comment: Some(format!(
+                    "   Build Time:{}",
+                    Self::format_dhms(result.total_time.ceil())
+                )),
+            });
         }
         None
     }
@@ -359,12 +359,13 @@ impl EstimateRunner {
             let cmd = cmd.expect("gcode read");
 
             // If we don't have a slicer figured out yet, and this is a comment, try
-            if cmd.op.is_nop() && self.state.result.slicer.is_none() {
-                if let Some(comment) = cmd.comment.as_ref() {
-                    self.state.result.slicer = SlicerPreset::determine(comment);
-                    if let Some(preset) = self.state.result.slicer.as_ref() {
-                        self.state.gcode_interceptor = metadata_processor(preset);
-                    }
+            if cmd.op.is_nop()
+                && self.state.result.slicer.is_none()
+                && let Some(comment) = cmd.comment.as_ref()
+            {
+                self.state.result.slicer = SlicerPreset::determine(comment);
+                if let Some(preset) = self.state.result.slicer.as_ref() {
+                    self.state.gcode_interceptor = metadata_processor(preset);
                 }
             }
 

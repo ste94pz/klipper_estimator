@@ -61,13 +61,11 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-// `Option::is_some_and` would raise the documented Rust 1.58 MSRV.
-#[allow(clippy::unnecessary_map_or)]
 fn fixture_paths() -> Vec<PathBuf> {
     let mut paths: Vec<_> = fs::read_dir(repo_root().join("tests/fixtures/accuracy"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .collect();
     paths.sort();
     paths

@@ -150,7 +150,9 @@ fn bed_mesh_path_and_duration_match_pinned_klipper() {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("klipper"));
     if !klipper.join("klippy/extras/bed_mesh.py").is_file() {
-        eprintln!("skipping motion-transform differential: set KLIPPER_PATH to Klipper {PINNED_KLIPPER_COMMIT}");
+        eprintln!(
+            "skipping motion-transform differential: set KLIPPER_PATH to Klipper {PINNED_KLIPPER_COMMIT}"
+        );
         return;
     }
     for filename in ["bed_mesh.json", "bed_mesh_bicubic.json"] {

@@ -16,7 +16,7 @@ use lib_klipper::planner::{
 };
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -232,15 +232,14 @@ impl ConfigSnapshot {
         let extruders = parse_extruders(&self.configfile_settings)?;
         apply_extruder_limits(&mut self.limits, &extruders);
         self.extruders = extruders;
-        if self.source.selection == SnapshotSelection::RuntimeSnapshot {
-            if let Some(active) = self
+        if self.source.selection == SnapshotSelection::RuntimeSnapshot
+            && let Some(active) = self
                 .runtime
                 .as_ref()
                 .and_then(|runtime| runtime.toolhead.get("extruder"))
                 .and_then(Value::as_str)
-            {
-                self.limits.initial_extruder = Some(active.into());
-            }
+        {
+            self.limits.initial_extruder = Some(active.into());
         }
         self.warnings
             .push("migrated legacy snapshot to the per-extruder limit model".into());
@@ -297,7 +296,9 @@ pub enum SnapshotError {
     UnsupportedSchema(u32),
     #[error("configuration snapshot fingerprint mismatch (expected {expected}, found {actual})")]
     FingerprintMismatch { expected: String, actual: String },
-    #[error("cached runtime snapshots are stale by definition; reconnect to Moonraker or select configuration-default mode")]
+    #[error(
+        "cached runtime snapshots are stale by definition; reconnect to Moonraker or select configuration-default mode"
+    )]
     StaleRuntimeCache,
     #[error("could not read Moonraker cache: {0}")]
     CacheRead(#[source] std::io::Error),
@@ -305,9 +306,7 @@ pub enum SnapshotError {
     CacheParse(#[source] serde_json::Error),
     #[error("could not write Moonraker cache: {0}")]
     CacheWrite(#[source] std::io::Error),
-    #[error(
-        "offline configuration path '{0}' must be relative to the declared configuration root"
-    )]
+    #[error("offline configuration path '{0}' must be relative to the declared configuration root")]
     OfflineAbsolutePath(String),
     #[error("could not access offline configuration root '{path}': {source}")]
     OfflineRoot {
@@ -328,7 +327,9 @@ pub enum SnapshotError {
         include: String,
         source_file: String,
     },
-    #[error("offline configuration include '{include}' from '{source_file}' resolves '{first}' and '{second}' to the same file")]
+    #[error(
+        "offline configuration include '{include}' from '{source_file}' resolves '{first}' and '{second}' to the same file"
+    )]
     OfflineAmbiguousInclude {
         include: String,
         source_file: String,
@@ -816,19 +817,18 @@ fn motion_transforms_from_settings(
                 })?;
             config.profiles.insert(name.into(), profile);
         }
-        if selection == SnapshotSelection::RuntimeSnapshot {
-            if let Some(runtime) = bed_mesh_runtime.and_then(Value::as_object) {
-                if let Some(profile) = runtime_bed_mesh(runtime)? {
-                    let name = runtime
-                        .get("profile_name")
-                        .and_then(Value::as_str)
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or("__runtime__")
-                        .to_string();
-                    config.profiles.insert(name.clone(), profile);
-                    config.initial_profile = Some(name);
-                }
-            }
+        if selection == SnapshotSelection::RuntimeSnapshot
+            && let Some(runtime) = bed_mesh_runtime.and_then(Value::as_object)
+            && let Some(profile) = runtime_bed_mesh(runtime)?
+        {
+            let name = runtime
+                .get("profile_name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("__runtime__")
+                .to_string();
+            config.profiles.insert(name.clone(), profile);
+            config.initial_profile = Some(name);
         }
         transforms.bed_mesh = Some(config);
     }
@@ -995,7 +995,7 @@ fn kinematics_from_settings(
             return Ok(Kinematics::unsupported(
                 backend,
                 "generic Cartesian carriage expressions are not modeled",
-            ))
+            ));
         }
         "delta" => {
             let sections = ["stepper_a", "stepper_b", "stepper_c"];
@@ -1860,7 +1860,7 @@ fn expand_path_pattern(
                         return Err(SnapshotError::OfflineRead {
                             path: confined.display().to_string(),
                             source,
-                        })
+                        });
                     }
                 };
                 entries.sort_by_key(|entry| entry.file_name());
@@ -2451,12 +2451,14 @@ fn resolve_offline_settings(
         }
         object.insert(
             "algo".into(),
-            json!(options
-                .get("algo")
-                .ok_or_else(|| SnapshotError::OfflineMissingOption {
-                    section: section.clone(),
-                    option: "algo".into(),
-                })?),
+            json!(
+                options
+                    .get("algo")
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: section.clone(),
+                        option: "algo".into(),
+                    })?
+            ),
         );
         resolved.insert(section.clone(), Value::Object(object));
     }
@@ -2856,10 +2858,12 @@ mod tests {
             snapshot.limits.kinematics,
             Kinematics::Unsupported { .. }
         ));
-        assert!(snapshot
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("winch")));
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("winch"))
+        );
 
         let mut dual_carriage_settings = settings();
         dual_carriage_settings.insert("dual_carriage".into(), json!({ "axis": "x" }));
@@ -2939,12 +2943,14 @@ mod tests {
                 .initial_profile,
             None
         );
-        assert!(default_transforms
-            .bed_mesh
-            .as_ref()
-            .unwrap()
-            .profiles
-            .contains_key("saved"));
+        assert!(
+            default_transforms
+                .bed_mesh
+                .as_ref()
+                .unwrap()
+                .profiles
+                .contains_key("saved")
+        );
 
         let runtime_snapshot = snapshot_from_status(
             "http://printer.local",
@@ -2973,10 +2979,12 @@ mod tests {
             Some("calibrated")
         );
         assert_eq!(runtime_snapshot.accuracy, SnapshotAccuracy::Degraded);
-        assert!(runtime_snapshot
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("runtime factors")));
+        assert!(
+            runtime_snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("runtime factors"))
+        );
     }
 
     #[test]
@@ -3215,10 +3223,12 @@ lower_arm_length: 320
             imported.limits.extruders["extruder1"].max_extrude_only_velocity,
             30.0
         );
-        assert!(imported
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("migrated legacy snapshot")));
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("migrated legacy snapshot"))
+        );
         imported.validate().unwrap();
     }
 
@@ -3257,10 +3267,12 @@ lower_arm_length: 320
             cached.retrieved_at_unix_seconds,
             snapshot.retrieved_at_unix_seconds
         );
-        assert!(cached
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("cached configuration-default snapshot")));
+        assert!(
+            cached
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("cached configuration-default snapshot"))
+        );
         assert_eq!(cached.summary().accuracy, SnapshotAccuracy::Degraded);
     }
 
@@ -3420,26 +3432,32 @@ max_velocity: 250
             0.8
         );
         assert!(offline.limits.motion_transforms.bed_mesh.is_some());
-        assert!(offline
-            .limits
-            .motion_transforms
-            .bed_mesh
-            .as_ref()
-            .unwrap()
-            .profiles
-            .contains_key("saved"));
-        assert!(offline
-            .limits
-            .motion_transforms
-            .skew_correction
-            .as_ref()
-            .unwrap()
-            .profiles
-            .contains_key("calibrated"));
-        assert!(!offline
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("bed_mesh")));
+        assert!(
+            offline
+                .limits
+                .motion_transforms
+                .bed_mesh
+                .as_ref()
+                .unwrap()
+                .profiles
+                .contains_key("saved")
+        );
+        assert!(
+            offline
+                .limits
+                .motion_transforms
+                .skew_correction
+                .as_ref()
+                .unwrap()
+                .profiles
+                .contains_key("calibrated")
+        );
+        assert!(
+            !offline
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("bed_mesh"))
+        );
     }
 
     #[test]

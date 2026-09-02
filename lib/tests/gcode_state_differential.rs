@@ -73,7 +73,9 @@ fn command_sequence_matches_pinned_klipper_gcode_move() {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("klipper"));
     if !klipper.join("klippy/extras/gcode_move.py").is_file() {
-        eprintln!("skipping G-code state differential: set KLIPPER_PATH to Klipper {PINNED_KLIPPER_COMMIT}");
+        eprintln!(
+            "skipping G-code state differential: set KLIPPER_PATH to Klipper {PINNED_KLIPPER_COMMIT}"
+        );
         return;
     }
 

@@ -448,14 +448,14 @@ impl KinematicsChecker for DeltesianKinematics {
             let ratio = move_cmd.distance / delta.z.abs();
             move_cmd.limit_speed(self.max_z_velocity * ratio, self.max_z_accel * ratio);
         }
-        if delta.x != 0.0 {
-            if let Some((slow_x2, very_slow_x2)) = self.slow_limits() {
-                let move_x2 = move_cmd.start.x.powi(2).max(move_cmd.end.x.powi(2));
-                if move_x2 > very_slow_x2 {
-                    move_cmd.limit_speed(self.max_velocity * 0.25, self.max_accel * 0.25);
-                } else if move_x2 > slow_x2 {
-                    move_cmd.limit_speed(self.max_velocity * 0.5, self.max_accel * 0.5);
-                }
+        if delta.x != 0.0
+            && let Some((slow_x2, very_slow_x2)) = self.slow_limits()
+        {
+            let move_x2 = move_cmd.start.x.powi(2).max(move_cmd.end.x.powi(2));
+            if move_x2 > very_slow_x2 {
+                move_cmd.limit_speed(self.max_velocity * 0.25, self.max_accel * 0.25);
+            } else if move_x2 > slow_x2 {
+                move_cmd.limit_speed(self.max_velocity * 0.5, self.max_accel * 0.5);
             }
         }
     }
