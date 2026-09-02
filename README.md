@@ -182,7 +182,7 @@ boundaries in the estimate. This includes `M400`, `G4`, homing, temperature
 waits, and the estimator's existing indeterminate wait operations. Motion on
 the two sides of a boundary therefore starts or ends at rest as appropriate.
 
-#### Cartesian-family kinematics
+#### Kinematics
 
 The estimator applies Klipper's configured axis ranges, `max_z_velocity`, and
 `max_z_accel` for `cartesian`, `corexy`, `corexz`, `hybrid_corexy`, and
@@ -192,12 +192,17 @@ printer, configured axes are treated as homed; a move outside their range
 produces a structured `move_outside_kinematic_bounds` diagnostic indicating
 that Klipper would reject the file.
 
-`generic_cartesian`, dual-carriage configurations, and non-linear backends are
-not approximated as Cartesian. Their snapshot has degraded accuracy, names the
-unsupported backend in its warnings, and produces an
-`unsupported_kinematics` planner diagnostic. Generic Cartesian carriage
-expressions and active dual-carriage state must be modeled before those
-configurations can be supported safely.
+Delta, polar, deltesian, and rotary-delta configurations are supported from
+Moonraker or an offline Klipper configuration. The estimator imports their
+machine geometry, rejects unreachable endpoints, applies Z limits, and mirrors
+Klipper's radial, angular, arm-ratio, and tapered slow zones. Invalid geometry
+fails configuration loading instead of producing an estimate.
+
+Other unsupported backends, `generic_cartesian`, and dual-carriage
+configurations degrade snapshot accuracy, name the unsupported backend in their
+warnings, and produce an `unsupported_kinematics` planner diagnostic. Generic
+Cartesian carriage expressions and active dual-carriage state must be modeled
+before those configurations can be supported safely.
 
 ### `estimate` mode
 

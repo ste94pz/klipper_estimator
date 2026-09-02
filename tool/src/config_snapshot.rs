@@ -4,7 +4,10 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lib_klipper::glam::DVec3;
-use lib_klipper::kinematics::{CartesianKinematics, CartesianKinematicsKind, Kinematics};
+use lib_klipper::kinematics::{
+    CartesianKinematics, CartesianKinematicsKind, DeltaKinematics, DeltesianKinematics, Kinematics,
+    PolarKinematics, RotaryDeltaKinematics,
+};
 use lib_klipper::planner::{FirmwareRetractionOptions, MoveChecker, PositionMode, PrinterLimits};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -191,6 +194,8 @@ pub enum SnapshotError {
     MissingObject(String),
     #[error("Moonraker response is missing required field '{0}'")]
     MissingField(String),
+    #[error("invalid {backend} kinematics geometry: {reason}")]
+    InvalidKinematicsGeometry { backend: String, reason: String },
     #[error("unsupported configuration snapshot schema {0}")]
     UnsupportedSchema(u32),
     #[error("configuration snapshot fingerprint mismatch (expected {expected}, found {actual})")]
@@ -463,6 +468,115 @@ fn optional_number(object: &serde_json::Map<String, Value>, field: &str) -> Opti
     object.get(field).and_then(Value::as_f64)
 }
 
+fn settings_object<'a>(
+    settings: &'a BTreeMap<String, Value>,
+    name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, SnapshotError> {
+    settings
+        .get(name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| SnapshotError::MissingField(format!("configfile.settings.{name}")))
+}
+
+fn inherited_numbers<const N: usize>(
+    settings: &BTreeMap<String, Value>,
+    sections: [&str; N],
+    field: &str,
+    defaults: [f64; N],
+) -> Result<[f64; N], SnapshotError> {
+    let mut values = defaults;
+    for (index, section) in sections.iter().enumerate() {
+        let object = settings_object(settings, section)?;
+        if let Some(value) = optional_number(object, field) {
+            values[index] = value;
+        } else if index == 0 {
+            return Err(SnapshotError::MissingField(format!(
+                "configfile.settings.{section}.{field}"
+            )));
+        } else {
+            values[index] = values[0];
+        }
+    }
+    Ok(values)
+}
+
+fn default_numbers<const N: usize>(
+    settings: &BTreeMap<String, Value>,
+    sections: [&str; N],
+    field: &str,
+    defaults: [f64; N],
+) -> Result<[f64; N], SnapshotError> {
+    let mut values = defaults;
+    for (index, section) in sections.iter().enumerate() {
+        if let Some(value) = optional_number(settings_object(settings, section)?, field) {
+            values[index] = value;
+        }
+    }
+    Ok(values)
+}
+
+fn linear_step_distance(
+    object: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<f64, SnapshotError> {
+    if let Some(distance) = optional_number(object, "step_distance") {
+        return Ok(distance);
+    }
+    let rotation_distance = number(object, &format!("{path}.rotation_distance"))?;
+    let microsteps = number(object, &format!("{path}.microsteps"))?;
+    let full_steps = optional_number(object, "full_steps_per_rotation").unwrap_or(200.0);
+    let gearing = object
+        .get("gear_ratio")
+        .and_then(Value::as_array)
+        .and_then(|pairs| {
+            pairs.iter().try_fold(1.0, |ratio, pair| {
+                let pair = pair.as_array()?;
+                Some(ratio * pair.first()?.as_f64()? / pair.get(1)?.as_f64()?)
+            })
+        })
+        .unwrap_or(1.0);
+    let distance = rotation_distance / (microsteps * full_steps * gearing);
+    if distance.is_finite() && distance > 0.0 {
+        Ok(distance)
+    } else {
+        Err(SnapshotError::MissingField(format!("{path}.step_distance")))
+    }
+}
+
+fn offline_step_distance(
+    options: &BTreeMap<String, String>,
+    section: &str,
+) -> Result<f64, SnapshotError> {
+    let rotation = required_float(options, section, "rotation_distance", |value| value > 0.0)?;
+    let microsteps = required_float(options, section, "microsteps", |value| value >= 1.0)?;
+    let full_steps = optional_float(
+        options,
+        section,
+        "full_steps_per_rotation",
+        200.0,
+        |value| value >= 1.0 && value % 4.0 == 0.0,
+    )?;
+    let gearing = options.get("gear_ratio").map_or(Ok(1.0), |value| {
+        value.split(',').try_fold(1.0, |ratio, stage| {
+            let mut parts = stage.split(':').map(str::trim);
+            let first = parts.next().and_then(|part| part.parse::<f64>().ok());
+            let second = parts.next().and_then(|part| part.parse::<f64>().ok());
+            match (first, second, parts.next()) {
+                (Some(first), Some(second), None) if first > 0.0 && second > 0.0 => {
+                    Ok(ratio * first / second)
+                }
+                _ => Err(SnapshotError::OfflineValue {
+                    section: section.into(),
+                    option: "gear_ratio".into(),
+                    value: value.into(),
+                    message: "expected one or more positive numerator:denominator pairs".into(),
+                }),
+            }
+        })
+    })?;
+    Ok(rotation / (microsteps * full_steps * gearing))
+}
+
 fn limits_from_settings(
     settings: &BTreeMap<String, Value>,
     extruders: &BTreeMap<String, ExtruderSnapshot>,
@@ -555,6 +669,119 @@ fn kinematics_from_settings(
                 "generic Cartesian carriage expressions are not modeled",
             ))
         }
+        "delta" => {
+            let sections = ["stepper_a", "stepper_b", "stepper_c"];
+            let arms = inherited_numbers(settings, sections, "arm_length", [0.0; 3])?;
+            let endstops = inherited_numbers(settings, sections, "position_endstop", [0.0; 3])?;
+            let angles = default_numbers(settings, sections, "angle", [210.0, 330.0, 90.0])?;
+            let mut step_distances = [0.0; 3];
+            for (index, section) in sections.iter().enumerate() {
+                step_distances[index] = linear_step_distance(
+                    settings_object(settings, section)?,
+                    &format!("configfile.settings.{section}"),
+                )?;
+            }
+            let radius = number(printer, "configfile.settings.printer.delta_radius")?;
+            return validated_kinematics(Kinematics::Delta {
+                config: DeltaKinematics {
+                    max_velocity: number(printer, "configfile.settings.printer.max_velocity")?,
+                    max_accel: number(printer, "configfile.settings.printer.max_accel")?,
+                    max_z_velocity: number(printer, "configfile.settings.printer.max_z_velocity")?,
+                    max_z_accel: number(printer, "configfile.settings.printer.max_z_accel")?,
+                    minimum_z: optional_number(printer, "minimum_z_position").unwrap_or(0.0),
+                    radius,
+                    print_radius: optional_number(printer, "print_radius").unwrap_or(radius),
+                    arm_lengths: arms,
+                    tower_angles: angles,
+                    position_endstops: endstops,
+                    step_distances,
+                },
+            });
+        }
+        "polar" => {
+            let arm = settings_object(settings, "stepper_arm")?;
+            let z = settings_object(settings, "stepper_z")?;
+            return validated_kinematics(Kinematics::Polar {
+                config: PolarKinematics {
+                    max_velocity: number(printer, "configfile.settings.printer.max_velocity")?,
+                    max_accel: number(printer, "configfile.settings.printer.max_accel")?,
+                    max_z_velocity: number(printer, "configfile.settings.printer.max_z_velocity")?,
+                    max_z_accel: number(printer, "configfile.settings.printer.max_z_accel")?,
+                    max_angular_velocity: optional_number(printer, "max_angular_velocity")
+                        .unwrap_or(0.0),
+                    maximum_radius: number(arm, "configfile.settings.stepper_arm.position_max")?,
+                    minimum_z: optional_number(z, "position_min").unwrap_or(0.0),
+                    maximum_z: number(z, "configfile.settings.stepper_z.position_max")?,
+                },
+            });
+        }
+        "deltesian" => {
+            let sections = ["stepper_left", "stepper_right"];
+            let arm_x = inherited_numbers(settings, sections, "arm_x_length", [0.0; 2])?;
+            let arms = inherited_numbers(settings, sections, "arm_length", [0.0; 2])?;
+            let endstops = inherited_numbers(settings, sections, "position_endstop", [0.0; 2])?;
+            let y = settings_object(settings, "stepper_y")?;
+            return validated_kinematics(Kinematics::Deltesian {
+                config: DeltesianKinematics {
+                    max_velocity: number(printer, "configfile.settings.printer.max_velocity")?,
+                    max_accel: number(printer, "configfile.settings.printer.max_accel")?,
+                    max_z_velocity: number(printer, "configfile.settings.printer.max_z_velocity")?,
+                    max_z_accel: number(printer, "configfile.settings.printer.max_z_accel")?,
+                    minimum_z: optional_number(printer, "minimum_z_position").unwrap_or(0.0),
+                    minimum_angle: optional_number(printer, "min_angle").unwrap_or(5.0),
+                    print_width: optional_number(printer, "print_width"),
+                    slow_ratio: optional_number(printer, "slow_ratio").unwrap_or(3.0),
+                    arm_x_lengths: arm_x,
+                    arm_lengths: arms,
+                    position_endstops: endstops,
+                    y_range: [
+                        optional_number(y, "position_min").unwrap_or(0.0),
+                        number(y, "configfile.settings.stepper_y.position_max")?,
+                    ],
+                },
+            });
+        }
+        "rotary_delta" => {
+            let sections = ["stepper_a", "stepper_b", "stepper_c"];
+            return validated_kinematics(Kinematics::RotaryDelta {
+                config: RotaryDeltaKinematics {
+                    max_z_velocity: number(printer, "configfile.settings.printer.max_z_velocity")?,
+                    minimum_z: optional_number(printer, "minimum_z_position").unwrap_or(0.0),
+                    shoulder_radius: number(
+                        printer,
+                        "configfile.settings.printer.shoulder_radius",
+                    )?,
+                    shoulder_height: number(
+                        printer,
+                        "configfile.settings.printer.shoulder_height",
+                    )?,
+                    upper_arm_lengths: inherited_numbers(
+                        settings,
+                        sections,
+                        "upper_arm_length",
+                        [0.0; 3],
+                    )?,
+                    lower_arm_lengths: inherited_numbers(
+                        settings,
+                        sections,
+                        "lower_arm_length",
+                        [0.0; 3],
+                    )?,
+                    tower_angles: default_numbers(
+                        settings,
+                        sections,
+                        "angle",
+                        [30.0, 150.0, 270.0],
+                    )?,
+                    position_endstops: inherited_numbers(
+                        settings,
+                        sections,
+                        "position_endstop",
+                        [0.0; 3],
+                    )?,
+                },
+            });
+        }
         _ => return Ok(Kinematics::unsupported(backend, "backend is not modeled")),
     };
 
@@ -579,6 +806,184 @@ fn kinematics_from_settings(
             max_z_accel: number(printer, "configfile.settings.printer.max_z_accel")?,
         },
     })
+}
+
+fn invalid_geometry(backend: &str, reason: impl Into<String>) -> SnapshotError {
+    SnapshotError::InvalidKinematicsGeometry {
+        backend: backend.into(),
+        reason: reason.into(),
+    }
+}
+
+fn validated_kinematics(kinematics: Kinematics) -> Result<Kinematics, SnapshotError> {
+    match &kinematics {
+        Kinematics::Delta { config } => {
+            if config.radius <= 0.0 || config.print_radius <= 0.0 {
+                return Err(invalid_geometry("delta", "radii must be positive"));
+            }
+            if config.arm_lengths.iter().any(|arm| *arm <= config.radius) {
+                return Err(invalid_geometry(
+                    "delta",
+                    "every arm_length must exceed delta_radius",
+                ));
+            }
+            if config
+                .step_distances
+                .iter()
+                .any(|distance| *distance <= 0.0)
+            {
+                return Err(invalid_geometry("delta", "step distances must be positive"));
+            }
+            let min_arm = config
+                .arm_lengths
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let half_step = config
+                .step_distances
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min)
+                * 0.5;
+            let ratio = 4.0 * 3.0;
+            if min_arm.powi(2) / (ratio * ratio + 1.0) <= half_step.powi(2) {
+                return Err(invalid_geometry(
+                    "delta",
+                    "step distance is too large for the configured arm geometry",
+                ));
+            }
+            let max_z = config
+                .position_endstops
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            if config.minimum_z > max_z {
+                return Err(invalid_geometry(
+                    "delta",
+                    "minimum_z_position exceeds maximum Z",
+                ));
+            }
+        }
+        Kinematics::Polar { config }
+            if config.maximum_radius <= 0.0 || config.minimum_z >= config.maximum_z =>
+        {
+            return Err(invalid_geometry(
+                "polar",
+                "arm radius and Z range must be non-empty",
+            ));
+        }
+        Kinematics::Deltesian { config } => {
+            if config
+                .arm_lengths
+                .iter()
+                .zip(config.arm_x_lengths)
+                .any(|(arm, arm_x)| *arm <= arm_x || arm_x <= 0.0)
+            {
+                return Err(invalid_geometry(
+                    "deltesian",
+                    "each arm_length must exceed arm_x_length",
+                ));
+            }
+            if !(0.0..=90.0).contains(&config.minimum_angle) || config.slow_ratio < 0.0 {
+                return Err(invalid_geometry("deltesian", "invalid angle or slow ratio"));
+            }
+            let cosine = config.minimum_angle.to_radians().cos();
+            let x_min = (-config.arm_x_lengths[0])
+                .max(-(cosine * config.arm_lengths[1] - config.arm_x_lengths[1]))
+                .ceil();
+            let x_max = config.arm_x_lengths[1]
+                .min(cosine * config.arm_lengths[0] - config.arm_x_lengths[0])
+                .floor();
+            let max_width = (x_max - x_min).min(x_max * 2.0).min(-x_min * 2.0);
+            if config
+                .print_width
+                .is_some_and(|width| width < 0.0 || width > max_width)
+            {
+                return Err(invalid_geometry(
+                    "deltesian",
+                    "print_width exceeds the kinematic X range",
+                ));
+            }
+            if config.y_range[0] >= config.y_range[1] {
+                return Err(invalid_geometry("deltesian", "Y range must be non-empty"));
+            }
+            let x_limits = match config.print_width {
+                Some(width) if width != 0.0 => [-width * 0.5, width * 0.5],
+                _ => [x_min, x_max],
+            };
+            let abs_endstops = std::array::from_fn::<_, 2, _>(|index| {
+                config.position_endstops[index]
+                    + (config.arm_lengths[index].powi(2) - config.arm_x_lengths[index].powi(2))
+                        .sqrt()
+            });
+            let pillars_z_max = |x: f64| {
+                (0..2)
+                    .map(|index| {
+                        let horizontal = if index == 0 {
+                            config.arm_x_lengths[index] + x
+                        } else {
+                            config.arm_x_lengths[index] - x
+                        };
+                        abs_endstops[index]
+                            - (config.arm_lengths[index].powi(2) - horizontal.powi(2)).sqrt()
+                    })
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let max_z = pillars_z_max(x_limits[0]).min(pillars_z_max(x_limits[1]));
+            if !max_z.is_finite() || config.minimum_z > max_z {
+                return Err(invalid_geometry(
+                    "deltesian",
+                    "minimum_z_position exceeds the geometric maximum Z",
+                ));
+            }
+        }
+        Kinematics::RotaryDelta { config } => {
+            if config.shoulder_radius <= 0.0
+                || config.shoulder_height <= 0.0
+                || config.upper_arm_lengths.iter().any(|arm| *arm <= 0.0)
+                || config.lower_arm_lengths.iter().any(|arm| *arm <= 0.0)
+            {
+                return Err(invalid_geometry(
+                    "rotary_delta",
+                    "radii, heights, and arm lengths are inconsistent",
+                ));
+            }
+            if config.minimum_z
+                > config
+                    .position_endstops
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min)
+            {
+                return Err(invalid_geometry(
+                    "rotary_delta",
+                    "minimum_z_position exceeds maximum Z",
+                ));
+            }
+            for index in 0..3 {
+                let dx = -config.shoulder_radius;
+                let dy = config.position_endstops[index] - config.shoulder_height;
+                if dy == 0.0 {
+                    return Err(invalid_geometry(
+                        "rotary_delta",
+                        "an endstop lies in the shoulder plane",
+                    ));
+                }
+                let upper2 = config.upper_arm_lengths[index].powi(2);
+                let lower2 = config.lower_arm_lengths[index].powi(2);
+                let c1 = 0.5 / dy * (dx * dx + dy * dy + upper2 - lower2);
+                let c2 = dx / dy;
+                if (c2 * c2 + 1.0) * upper2 - c1 * c1 < 0.0 {
+                    return Err(invalid_geometry(
+                        "rotary_delta",
+                        "endstop geometry has no real arm solution",
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(kinematics)
 }
 
 fn parse_extruders(
@@ -700,6 +1105,13 @@ pub fn load_offline_snapshot(
         "stepper_x",
         "stepper_y",
         "stepper_z",
+        "stepper_a",
+        "stepper_b",
+        "stepper_c",
+        "stepper_bed",
+        "stepper_arm",
+        "stepper_left",
+        "stepper_right",
         "firmware_retraction",
         "gcode_arcs",
     ];
@@ -1185,7 +1597,7 @@ fn resolve_offline_settings(
         );
     }
     let kinematics = printer.get("kinematics").map(String::as_str);
-    let has_klipper_z_limits = matches!(
+    let has_klipper_z_velocity = matches!(
         kinematics,
         Some(
             "cartesian"
@@ -1197,6 +1609,7 @@ fn resolve_offline_settings(
                 | "delta"
                 | "polar"
                 | "deltesian"
+                | "rotary_delta"
         )
     );
     if let Some(value) = printer.get("max_z_velocity") {
@@ -1206,7 +1619,7 @@ fn resolve_offline_settings(
                 number > 0.0 && number <= max_velocity
             })?),
         );
-    } else if has_klipper_z_limits {
+    } else if has_klipper_z_velocity {
         resolved_printer.insert("max_z_velocity".into(), json!(max_velocity));
     }
     if let Some(value) = printer.get("max_z_accel") {
@@ -1216,10 +1629,9 @@ fn resolve_offline_settings(
                 number > 0.0 && number <= max_accel
             })?),
         );
-    } else if has_klipper_z_limits {
+    } else if has_klipper_z_velocity && kinematics != Some("rotary_delta") {
         resolved_printer.insert("max_z_accel".into(), json!(max_accel));
     }
-    resolved.insert("printer".into(), Value::Object(resolved_printer));
 
     if matches!(
         kinematics,
@@ -1249,6 +1661,261 @@ fn resolve_offline_settings(
             );
         }
     }
+    match kinematics {
+        Some("delta") => {
+            let radius = required_float(printer, "printer", "delta_radius", |value| value > 0.0)?;
+            let print_radius =
+                optional_float(printer, "printer", "print_radius", radius, |value| {
+                    value > 0.0
+                })?;
+            let minimum_z = optional_float(
+                printer,
+                "printer",
+                "minimum_z_position",
+                0.0,
+                f64::is_finite,
+            )?;
+            let names = ["stepper_a", "stepper_b", "stepper_c"];
+            let first =
+                sections
+                    .get(names[0])
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: names[0].into(),
+                        option: "arm_length".into(),
+                    })?;
+            let default_arm =
+                required_float(first, names[0], "arm_length", |value| value > radius)?;
+            let default_endstop =
+                required_float(first, names[0], "position_endstop", f64::is_finite)?;
+            for (index, name) in names.iter().enumerate() {
+                let options =
+                    sections
+                        .get(*name)
+                        .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                            section: (*name).into(),
+                            option: "microsteps".into(),
+                        })?;
+                let arm = optional_float(options, name, "arm_length", default_arm, |value| {
+                    value > radius
+                })?;
+                let endstop = optional_float(
+                    options,
+                    name,
+                    "position_endstop",
+                    default_endstop,
+                    f64::is_finite,
+                )?;
+                let angle = optional_float(
+                    options,
+                    name,
+                    "angle",
+                    [210.0, 330.0, 90.0][index],
+                    f64::is_finite,
+                )?;
+                resolved.insert(
+                    (*name).into(),
+                    json!({
+                        "arm_length": arm,
+                        "position_endstop": endstop,
+                        "angle": angle,
+                        "step_distance": offline_step_distance(options, name)?,
+                    }),
+                );
+            }
+            let maximum_z = names
+                .iter()
+                .filter_map(|name| resolved.get(*name)?.get("position_endstop")?.as_f64())
+                .fold(f64::INFINITY, f64::min);
+            if minimum_z > maximum_z {
+                return Err(SnapshotError::OfflineValue {
+                    section: "printer".into(),
+                    option: "minimum_z_position".into(),
+                    value: minimum_z.to_string(),
+                    message: "value exceeds the delta maximum Z".into(),
+                });
+            }
+            resolved_printer.insert("delta_radius".into(), json!(radius));
+            resolved_printer.insert("print_radius".into(), json!(print_radius));
+            resolved_printer.insert("minimum_z_position".into(), json!(minimum_z));
+        }
+        Some("polar") => {
+            let arm =
+                sections
+                    .get("stepper_arm")
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: "stepper_arm".into(),
+                        option: "position_max".into(),
+                    })?;
+            let z =
+                sections
+                    .get("stepper_z")
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: "stepper_z".into(),
+                        option: "position_max".into(),
+                    })?;
+            let radius = required_float(arm, "stepper_arm", "position_max", |value| value > 0.0)?;
+            let z_min = optional_float(z, "stepper_z", "position_min", 0.0, f64::is_finite)?;
+            let z_max = required_float(z, "stepper_z", "position_max", |value| value > z_min)?;
+            resolved.insert("stepper_arm".into(), json!({ "position_max": radius }));
+            resolved.insert(
+                "stepper_z".into(),
+                json!({ "position_min": z_min, "position_max": z_max }),
+            );
+            resolved_printer.insert(
+                "max_angular_velocity".into(),
+                json!(optional_float(
+                    printer,
+                    "printer",
+                    "max_angular_velocity",
+                    0.0,
+                    |value| value >= 0.0
+                )?),
+            );
+        }
+        Some("deltesian") => {
+            let names = ["stepper_left", "stepper_right"];
+            let left =
+                sections
+                    .get(names[0])
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: names[0].into(),
+                        option: "arm_length".into(),
+                    })?;
+            let default_arm_x =
+                required_float(left, names[0], "arm_x_length", |value| value > 0.0)?;
+            let default_arm =
+                required_float(left, names[0], "arm_length", |value| value > default_arm_x)?;
+            let default_endstop =
+                required_float(left, names[0], "position_endstop", f64::is_finite)?;
+            for name in names {
+                let options =
+                    sections
+                        .get(name)
+                        .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                            section: name.into(),
+                            option: "arm_length".into(),
+                        })?;
+                let arm_x =
+                    optional_float(options, name, "arm_x_length", default_arm_x, |value| {
+                        value > 0.0
+                    })?;
+                let arm = optional_float(options, name, "arm_length", default_arm, |value| {
+                    value > arm_x
+                })?;
+                let endstop = optional_float(
+                    options,
+                    name,
+                    "position_endstop",
+                    default_endstop,
+                    f64::is_finite,
+                )?;
+                resolved.insert(name.into(), json!({ "arm_x_length": arm_x, "arm_length": arm, "position_endstop": endstop }));
+            }
+            let y =
+                sections
+                    .get("stepper_y")
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: "stepper_y".into(),
+                        option: "position_max".into(),
+                    })?;
+            let y_min = optional_float(y, "stepper_y", "position_min", 0.0, f64::is_finite)?;
+            let y_max = required_float(y, "stepper_y", "position_max", |value| value > y_min)?;
+            resolved.insert(
+                "stepper_y".into(),
+                json!({ "position_min": y_min, "position_max": y_max }),
+            );
+            resolved_printer.insert(
+                "minimum_z_position".into(),
+                json!(optional_float(
+                    printer,
+                    "printer",
+                    "minimum_z_position",
+                    0.0,
+                    f64::is_finite
+                )?),
+            );
+            resolved_printer.insert(
+                "min_angle".into(),
+                json!(optional_float(
+                    printer,
+                    "printer",
+                    "min_angle",
+                    5.0,
+                    |value| (0.0..=90.0).contains(&value)
+                )?),
+            );
+            resolved_printer.insert(
+                "slow_ratio".into(),
+                json!(optional_float(
+                    printer,
+                    "printer",
+                    "slow_ratio",
+                    3.0,
+                    |value| value >= 0.0
+                )?),
+            );
+            if let Some(value) = printer.get("print_width") {
+                resolved_printer.insert(
+                    "print_width".into(),
+                    json!(parse_float(
+                        "printer",
+                        "print_width",
+                        value,
+                        |number| number >= 0.0
+                    )?),
+                );
+            }
+        }
+        Some("rotary_delta") => {
+            let shoulder_radius =
+                required_float(printer, "printer", "shoulder_radius", |value| value > 0.0)?;
+            let shoulder_height =
+                required_float(printer, "printer", "shoulder_height", |value| value > 0.0)?;
+            let names = ["stepper_a", "stepper_b", "stepper_c"];
+            let first =
+                sections
+                    .get(names[0])
+                    .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                        section: names[0].into(),
+                        option: "upper_arm_length".into(),
+                    })?;
+            let default_upper =
+                required_float(first, names[0], "upper_arm_length", |value| value > 0.0)?;
+            let default_lower =
+                required_float(first, names[0], "lower_arm_length", |value| value > 0.0)?;
+            let default_endstop =
+                required_float(first, names[0], "position_endstop", f64::is_finite)?;
+            for (index, name) in names.iter().enumerate() {
+                let options =
+                    sections
+                        .get(*name)
+                        .ok_or_else(|| SnapshotError::OfflineMissingOption {
+                            section: (*name).into(),
+                            option: "upper_arm_length".into(),
+                        })?;
+                resolved.insert((*name).into(), json!({
+                    "upper_arm_length": optional_float(options, name, "upper_arm_length", default_upper, |value| value > 0.0)?,
+                    "lower_arm_length": optional_float(options, name, "lower_arm_length", default_lower, |value| value > 0.0)?,
+                    "position_endstop": optional_float(options, name, "position_endstop", default_endstop, f64::is_finite)?,
+                    "angle": optional_float(options, name, "angle", [30.0, 150.0, 270.0][index], f64::is_finite)?,
+                }));
+            }
+            resolved_printer.insert(
+                "minimum_z_position".into(),
+                json!(optional_float(
+                    printer,
+                    "printer",
+                    "minimum_z_position",
+                    0.0,
+                    f64::is_finite
+                )?),
+            );
+            resolved_printer.insert("shoulder_radius".into(), json!(shoulder_radius));
+            resolved_printer.insert("shoulder_height".into(), json!(shoulder_height));
+        }
+        _ => {}
+    }
+    resolved.insert("printer".into(), Value::Object(resolved_printer));
     if sections.contains_key("dual_carriage") {
         resolved.insert("dual_carriage".into(), json!({}));
     }
@@ -1607,7 +2274,7 @@ mod tests {
             .and_then(|settings| settings.get_mut("printer"))
             .and_then(Value::as_object_mut)
             .unwrap()
-            .insert("kinematics".into(), json!("delta"));
+            .insert("kinematics".into(), json!("winch"));
         let snapshot = snapshot_from_status(
             "http://printer.local",
             SnapshotSelection::ConfigurationDefault,
@@ -1624,13 +2291,181 @@ mod tests {
         assert!(snapshot
             .warnings
             .iter()
-            .any(|warning| warning.contains("delta")));
+            .any(|warning| warning.contains("winch")));
 
         let mut dual_carriage_settings = settings();
         dual_carriage_settings.insert("dual_carriage".into(), json!({ "axis": "x" }));
         let extruders = parse_extruders(&dual_carriage_settings).unwrap();
         let limits = limits_from_settings(&dual_carriage_settings, &extruders).unwrap();
         assert!(matches!(limits.kinematics, Kinematics::Unsupported { .. }));
+    }
+
+    #[test]
+    fn nonlinear_moonraker_settings_import_geometry() {
+        let cases = [
+            (
+                "delta",
+                json!({
+                    "printer": { "kinematics": "delta", "max_velocity": 300.0, "max_accel": 3000.0, "minimum_cruise_ratio": 0.5, "square_corner_velocity": 5.0, "max_z_velocity": 150.0, "max_z_accel": 1000.0, "delta_radius": 174.75, "print_radius": 170.0, "minimum_z_position": 0.0 },
+                    "stepper_a": { "arm_length": 333.0, "position_endstop": 297.05, "rotation_distance": 40.0, "microsteps": 16.0 },
+                    "stepper_b": { "arm_length": 333.0, "position_endstop": 297.05, "rotation_distance": 40.0, "microsteps": 16.0 },
+                    "stepper_c": { "arm_length": 333.0, "position_endstop": 297.05, "rotation_distance": 40.0, "microsteps": 16.0 }
+                }),
+            ),
+            (
+                "polar",
+                json!({
+                    "printer": { "kinematics": "polar", "max_velocity": 300.0, "max_accel": 3000.0, "minimum_cruise_ratio": 0.5, "square_corner_velocity": 5.0, "max_z_velocity": 25.0, "max_z_accel": 30.0, "max_angular_velocity": 5.0 },
+                    "stepper_arm": { "position_max": 300.0 },
+                    "stepper_z": { "position_min": 0.0, "position_max": 200.0 }
+                }),
+            ),
+            (
+                "deltesian",
+                json!({
+                    "printer": { "kinematics": "deltesian", "max_velocity": 300.0, "max_accel": 3000.0, "minimum_cruise_ratio": 0.5, "square_corner_velocity": 5.0, "max_z_velocity": 150.0, "max_z_accel": 1000.0, "minimum_z_position": 0.0, "min_angle": 5.0, "slow_ratio": 3.0 },
+                    "stepper_left": { "arm_x_length": 160.0, "arm_length": 217.0, "position_endstop": 268.0 },
+                    "stepper_right": { "arm_x_length": 160.0, "arm_length": 217.0, "position_endstop": 268.0 },
+                    "stepper_y": { "position_min": 0.0, "position_max": 200.0 }
+                }),
+            ),
+            (
+                "rotary_delta",
+                json!({
+                    "printer": { "kinematics": "rotary_delta", "max_velocity": 300.0, "max_accel": 3000.0, "minimum_cruise_ratio": 0.5, "square_corner_velocity": 5.0, "max_z_velocity": 50.0, "shoulder_radius": 33.9, "shoulder_height": 412.9, "minimum_z_position": 0.0 },
+                    "stepper_a": { "upper_arm_length": 170.0, "lower_arm_length": 320.0, "position_endstop": 252.0 },
+                    "stepper_b": { "upper_arm_length": 170.0, "lower_arm_length": 320.0, "position_endstop": 252.0 },
+                    "stepper_c": { "upper_arm_length": 170.0, "lower_arm_length": 320.0, "position_endstop": 252.0 }
+                }),
+            ),
+        ];
+        for (backend, value) in cases {
+            let settings: BTreeMap<String, Value> = serde_json::from_value(value).unwrap();
+            let printer = settings["printer"].as_object().unwrap();
+            let kinematics = kinematics_from_settings(&settings, printer).unwrap();
+            assert!(matches!(
+                (backend, kinematics),
+                ("delta", Kinematics::Delta { .. })
+                    | ("polar", Kinematics::Polar { .. })
+                    | ("deltesian", Kinematics::Deltesian { .. })
+                    | ("rotary_delta", Kinematics::RotaryDelta { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_nonlinear_geometry_fails_loading() {
+        let settings: BTreeMap<String, Value> = serde_json::from_value(json!({
+            "printer": { "kinematics": "delta", "max_velocity": 300.0, "max_accel": 3000.0, "max_z_velocity": 150.0, "max_z_accel": 1000.0, "delta_radius": 200.0 },
+            "stepper_a": { "arm_length": 190.0, "position_endstop": 250.0, "rotation_distance": 40.0, "microsteps": 16.0 },
+            "stepper_b": { "arm_length": 190.0, "position_endstop": 250.0, "rotation_distance": 40.0, "microsteps": 16.0 },
+            "stepper_c": { "arm_length": 190.0, "position_endstop": 250.0, "rotation_distance": 40.0, "microsteps": 16.0 }
+        })).unwrap();
+        let error = kinematics_from_settings(&settings, settings["printer"].as_object().unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SnapshotError::InvalidKinematicsGeometry { .. }
+        ));
+    }
+
+    #[test]
+    fn nonlinear_offline_configurations_resolve_without_degradation() {
+        const EXTRUDER: &str = r#"
+[extruder]
+nozzle_diameter: 0.4
+filament_diameter: 1.75
+"#;
+        let cases = [
+            (
+                "delta",
+                r#"[printer]
+kinematics: delta
+max_velocity: 300
+max_accel: 3000
+max_z_velocity: 150
+max_z_accel: 1000
+delta_radius: 174.75
+[stepper_a]
+microsteps: 16
+rotation_distance: 40
+position_endstop: 297.05
+arm_length: 333
+[stepper_b]
+microsteps: 16
+rotation_distance: 40
+[stepper_c]
+microsteps: 16
+rotation_distance: 40
+"#,
+            ),
+            (
+                "polar",
+                r#"[printer]
+kinematics: polar
+max_velocity: 300
+max_accel: 3000
+max_z_velocity: 25
+max_z_accel: 30
+max_angular_velocity: 5
+[stepper_bed]
+[stepper_arm]
+position_max: 300
+[stepper_z]
+position_min: 0
+position_max: 200
+"#,
+            ),
+            (
+                "deltesian",
+                r#"[printer]
+kinematics: deltesian
+max_velocity: 300
+max_accel: 3000
+max_z_velocity: 150
+max_z_accel: 1000
+[stepper_left]
+position_endstop: 268
+arm_length: 217
+arm_x_length: 160
+[stepper_right]
+[stepper_y]
+position_min: 0
+position_max: 200
+"#,
+            ),
+            (
+                "rotary_delta",
+                r#"[printer]
+kinematics: rotary_delta
+max_velocity: 300
+max_accel: 3000
+max_z_velocity: 50
+shoulder_radius: 33.9
+shoulder_height: 412.9
+[stepper_a]
+position_endstop: 252
+upper_arm_length: 170
+lower_arm_length: 320
+[stepper_b]
+[stepper_c]
+"#,
+            ),
+        ];
+        for (backend, config) in cases {
+            let directory = TestDirectory::new(&format!("offline-{backend}"));
+            directory.write("printer.cfg", &format!("{config}{EXTRUDER}"));
+            let snapshot =
+                load_offline_snapshot(directory.0.to_str().unwrap(), "printer.cfg").unwrap();
+            assert_eq!(snapshot.accuracy, SnapshotAccuracy::Complete);
+            assert!(matches!(
+                (backend, snapshot.limits.kinematics),
+                ("delta", Kinematics::Delta { .. })
+                    | ("polar", Kinematics::Polar { .. })
+                    | ("deltesian", Kinematics::Deltesian { .. })
+                    | ("rotary_delta", Kinematics::RotaryDelta { .. })
+            ));
+        }
     }
 
     #[test]

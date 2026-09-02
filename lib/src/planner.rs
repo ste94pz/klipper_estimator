@@ -438,14 +438,25 @@ impl PlannerDiagnostic {
     }
 
     fn move_out_of_range(violation: MoveOutOfRange) -> Self {
-        let axis = ["X", "Y", "Z"][violation.axis];
+        let message = match violation {
+            MoveOutOfRange::Axis {
+                axis,
+                position,
+                minimum,
+                maximum,
+            } => format!(
+                "Klipper would reject {}={position:.6} outside configured range {minimum:.6}..{maximum:.6}",
+                ["X", "Y", "Z"][axis]
+            ),
+            MoveOutOfRange::Reachability { backend, position } => format!(
+                "Klipper {backend} reachability rejects X={:.6} Y={:.6} Z={:.6}",
+                position.x, position.y, position.z
+            ),
+        };
         Self {
             code: PlannerDiagnosticCode::MoveOutsideKinematicBounds,
             command: "MOVE".into(),
-            message: format!(
-                "Klipper would reject {axis}={:.6} outside configured range {:.6}..{:.6}",
-                violation.position, violation.minimum, violation.maximum
-            ),
+            message,
         }
     }
 }

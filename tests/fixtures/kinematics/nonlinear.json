@@ -1,0 +1,87 @@
+{
+  "name": "nonlinear_kinematics",
+  "limits": {
+    "max_velocity": 300.0,
+    "max_acceleration": 3000.0,
+    "minimum_cruise_ratio": 0.5,
+    "square_corner_velocity": 5.0
+  },
+  "backends": {
+    "delta": {
+      "max_velocity": 300.0,
+      "max_accel": 3000.0,
+      "max_z_velocity": 150.0,
+      "max_z_accel": 1000.0,
+      "minimum_z": 0.0,
+      "radius": 174.75,
+      "print_radius": 174.75,
+      "arm_lengths": [333.0, 333.0, 333.0],
+      "tower_angles": [210.0, 330.0, 90.0],
+      "position_endstops": [297.05, 297.05, 297.05],
+      "step_distances": [0.0125, 0.0125, 0.0125]
+    },
+    "polar": {
+      "max_velocity": 300.0,
+      "max_accel": 3000.0,
+      "max_z_velocity": 25.0,
+      "max_z_accel": 30.0,
+      "max_angular_velocity": 5.0,
+      "maximum_radius": 300.0,
+      "minimum_z": 0.0,
+      "maximum_z": 200.0
+    },
+    "deltesian": {
+      "max_velocity": 300.0,
+      "max_accel": 3000.0,
+      "max_z_velocity": 150.0,
+      "max_z_accel": 1000.0,
+      "minimum_z": 0.0,
+      "minimum_angle": 5.0,
+      "print_width": null,
+      "slow_ratio": 3.0,
+      "arm_x_lengths": [160.0, 160.0],
+      "arm_lengths": [217.0, 217.0],
+      "position_endstops": [268.0, 268.0],
+      "y_range": [0.0, 200.0]
+    },
+    "rotary_delta": {
+      "max_z_velocity": 50.0,
+      "minimum_z": 0.0,
+      "shoulder_radius": 33.9,
+      "shoulder_height": 412.9,
+      "upper_arm_lengths": [170.0, 170.0, 170.0],
+      "lower_arm_lengths": [320.0, 320.0, 320.0],
+      "tower_angles": [30.0, 150.0, 270.0],
+      "position_endstops": [252.0, 252.0, 252.0]
+    }
+  },
+  "cases": [
+    { "backend": "delta", "case": "center", "start": [0.0, 0.0, 10.0, 0.0], "end": [20.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "delta", "case": "boundary", "start": [140.0, 0.0, 10.0, 0.0], "end": [157.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "delta", "case": "vertical", "start": [0.0, 0.0, 10.0, 0.0], "end": [0.0, 0.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "delta", "case": "diagonal", "start": [0.0, 0.0, 10.0, 0.0], "end": [100.0, 0.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "delta", "case": "slow_zone", "start": [130.0, 0.0, 10.0, 0.0], "end": [145.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "delta", "case": "outside", "start": [0.0, 0.0, 10.0, 0.0], "end": [160.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+
+    { "backend": "polar", "case": "center", "start": [-10.0, 0.0, 10.0, 0.0], "end": [10.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "polar", "case": "boundary", "start": [250.0, 0.0, 10.0, 0.0], "end": [300.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "polar", "case": "vertical", "start": [100.0, 0.0, 10.0, 0.0], "end": [100.0, 0.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "polar", "case": "diagonal", "start": [100.0, 0.0, 10.0, 0.0], "end": [120.0, 0.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "polar", "case": "slow_zone", "start": [10.0, 10.0, 10.0, 0.0], "end": [10.0, -10.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "polar", "case": "outside", "start": [0.0, 0.0, 10.0, 0.0], "end": [301.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+
+    { "backend": "deltesian", "case": "center", "start": [0.0, 10.0, 10.0, 0.0], "end": [20.0, 10.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "deltesian", "case": "boundary", "start": [50.0, 10.0, 10.0, 0.0], "end": [56.0, 10.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "deltesian", "case": "vertical", "start": [0.0, 10.0, 10.0, 0.0], "end": [0.0, 10.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "deltesian", "case": "diagonal", "start": [0.0, 10.0, 10.0, 0.0], "end": [40.0, 10.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "deltesian", "case": "slow_zone", "start": [40.0, 10.0, 10.0, 0.0], "end": [50.0, 10.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "deltesian", "case": "outside", "start": [0.0, 10.0, 10.0, 0.0], "end": [57.0, 10.0, 10.0, 0.0], "speed": 300.0 },
+
+    { "backend": "rotary_delta", "case": "center", "start": [0.0, 0.0, 10.0, 0.0], "end": [20.0, 0.0, 10.0, 0.0], "speed": 300.0 },
+    { "backend": "rotary_delta", "case": "boundary", "start": [180.0, 0.0, 100.0, 0.0], "end": [203.0, 0.0, 100.0, 0.0], "speed": 300.0 },
+    { "backend": "rotary_delta", "case": "vertical", "start": [0.0, 0.0, 10.0, 0.0], "end": [0.0, 0.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "rotary_delta", "case": "diagonal", "start": [0.0, 0.0, 10.0, 0.0], "end": [100.0, 0.0, 110.0, 0.0], "speed": 300.0 },
+    { "backend": "rotary_delta", "case": "slow_zone", "start": [0.0, 0.0, 220.0, 0.0], "end": [20.0, 0.0, 220.0, 0.0], "speed": 300.0 },
+    { "backend": "rotary_delta", "case": "outside", "start": [0.0, 0.0, 240.0, 0.0], "end": [15.0, 0.0, 240.0, 0.0], "speed": 300.0 }
+  ]
+}

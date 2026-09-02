@@ -44,8 +44,13 @@ snapshot also carries XYZ travel ranges and the configured Z velocity and
 acceleration limits. The planner applies the same component-based Z scaling as
 Klipper, including diagonal moves, and diagnoses endpoints outside the
 configured range. It assumes the axes have already been homed before the print.
-Generic Cartesian expressions, dual-carriage active state, and non-linear
-kinematics are not approximated: they degrade the snapshot accuracy and emit a
+For `delta`, `polar`, `deltesian`, and `rotary_delta`, the snapshot carries the
+configured machine geometry and slow-zone parameters. Reachability is checked
+separately from duration limits, and the planner mirrors the backend-specific Z,
+radial, angular, arm-ratio, and tapered-envelope behavior from the pinned
+Klipper reference. Invalid geometry is rejected while loading the configuration.
+Generic Cartesian expressions, dual-carriage active state, and other unsupported
+kinematics are not approximated: they degrade snapshot accuracy and emit a
 structured unsupported-kinematics diagnostic.
 
 ## What is not generally predictable from the file
