@@ -46,28 +46,52 @@ Basic usage info can be found by running `klipper_estimator` with no arguments.
 
 In order to provide accurate times, `klipper_estimator` needs printer settings
 including maximum velocity, acceleration, etc. It can take these either from a
-config file(`--config_file` option) or grab them directly from Moonraker(using
-the `--config_moonraker_url` option and, if authentication is required,
+config file (`--config_file`) or grab them directly from Moonraker
+(`--config_moonraker_url` and, if authentication is required,
 `--config_moonraker_api_key`). Note that the Klipper configuration files cannot
 be used directly.
 
-To experiment with settings, one can use the `dump-config` command together with
-`--config_moonraker_url` to generate a config file based on the current printer
-settings. The config file can then be modified and used as input for the other
-commands.
+Moonraker configuration is stored as a versioned snapshot. A snapshot records
+its source, retrieval time, Klipper version, resolved `configfile.settings`,
+every configured extruder, the queried `toolhead` and `gcode_move` objects, and
+a stable SHA-256 fingerprint. The fingerprint covers the effective limits and
+resolved settings but not the retrieval time, so equivalent snapshots remain
+comparable.
+
+The default `--config_moonraker_mode configuration-default` estimates with
+resolved configuration defaults while retaining runtime objects as provenance.
+Use `--config_moonraker_mode runtime-snapshot` explicitly to apply the current
+runtime velocity limits and G-code coordinate modes. Runtime snapshots are not
+loaded from the Moonraker cache because those overrides would be stale.
+
+To experiment with settings, use `dump-config` together with
+`--config_moonraker_url` to export a complete snapshot. The result can be
+imported again without losing its provenance:
 
 To dump a config, use e.g.:
 ```
 $ ./klipper_estimator --config_moonraker_url http://192.168.0.21 dump-config > config.json
 ```
 
-The config file format is Json5 and thus allows normal JSON with some
-extensions(see https://json5.org/).
+The config file format is JSON5 and thus allows normal JSON with some
+extensions (see https://json5.org/). Legacy flat `PrinterLimits` JSON5 files
+remain supported. A legacy Moonraker cache is migrated explicitly and marked
+as degraded because it contains no Klipper version or resolved-settings
+provenance.
 
 After generating a config, one can use this in other commands like so:
 ```
 $ ./klipper_estimator --config_file config.json estimate ...
 ```
+
+If Moonraker is unavailable, `--config_moonraker_ignore_error` uses
+`--config_moonraker_cache_file` only when a compatible configuration-default
+snapshot exists. With no usable cache the command fails instead of silently
+falling back to generic limits. Running without any configuration source still
+uses the built-in limits for compatibility, but human output prints a warning
+and JSON output reports `configuration.accuracy` as `degraded` together with
+the reason. Estimate JSON always includes the configuration source, fingerprint,
+retrieval time, Klipper version, and warnings.
 
 ### Quirks
 

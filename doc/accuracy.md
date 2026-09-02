@@ -4,7 +4,21 @@
 
 ## What affects an estimate
 
-Use printer limits that match the machine which will run the file. The preferred source is Moonraker because Klipper has already resolved configuration defaults and included files. A dumped JSON5 configuration is useful for repeatable or offline estimates.
+Use printer limits that match the machine which will run the file. The
+preferred source is Moonraker because Klipper has already resolved
+configuration defaults and included files. A dumped, versioned JSON5 snapshot
+is useful for repeatable or offline estimates: it records the Klipper version,
+retrieval time, effective limits, resolved settings, source mode, and a stable
+fingerprint.
+
+Configuration-default and runtime-snapshot estimates answer different
+questions. The default uses values resolved from `configfile.settings` and is
+stable across transient `SET_VELOCITY_LIMIT` or G-code-state changes. An
+explicit runtime snapshot applies the current `toolhead` limits and
+`gcode_move` coordinate modes. Cached runtime state is rejected because it can
+no longer be assumed current. A configuration-default cache fallback is marked
+`degraded` in machine-readable output; failure to obtain Moonraker data without
+a usable cache does not fall back to generic limits.
 
 G-code may change velocity, acceleration, minimum cruise ratio, coordinate
 mode, or extrusion mode during a print. The estimator applies Klipper-compatible
@@ -35,4 +49,7 @@ compatibility defaults are `absolute` and `relative`, respectively; Klipper's
 native startup extrusion mode is `absolute`. Choose `absolute` explicitly when
 the file is analyzed without an invisible start macro that issues `M83`.
 
-When reporting an accuracy problem, include the G-code, dumped estimator configuration, estimator version, actual print duration, and whether the print contained pauses or runtime overrides. Remove credentials and private macro contents before sharing files.
+When reporting an accuracy problem, include the G-code, dumped estimator
+snapshot and its fingerprint, estimator version, actual print duration, and
+whether the print contained pauses or runtime overrides. Remove credentials
+and private macro contents before sharing files.

@@ -7,6 +7,7 @@ pub struct DumpConfigCmd;
 
 impl DumpConfigCmd {
     pub fn run(&self, opts: &Opts) {
-        let _ = serde_json::to_writer_pretty(std::io::stdout(), &opts.printer_limits());
+        serde_json::to_writer_pretty(std::io::stdout(), opts.config_snapshot())
+            .expect("configuration snapshot serialization failed");
     }
 }

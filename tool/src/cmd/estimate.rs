@@ -10,6 +10,7 @@ use clap::Parser;
 use ordered_float::NotNan;
 use serde::{ser::SerializeSeq, Serialize, Serializer};
 
+use crate::config_snapshot::ConfigSnapshotSummary;
 use crate::Opts;
 
 fn format_time(mut seconds: f64) -> String {
@@ -57,6 +58,7 @@ pub struct EstimateCmd {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 struct EstimationState {
+    configuration: Option<ConfigSnapshotSummary>,
     sequences: Vec<EstimationSequence>,
     diagnostics: Vec<PlannerDiagnostic>,
 }
@@ -202,7 +204,10 @@ impl EstimateCmd {
         let rdr = GCodeReader::new(BufReader::new(src));
 
         let mut planner = opts.make_planner();
-        let mut state = EstimationState::default();
+        let mut state = EstimationState {
+            configuration: Some(opts.config_snapshot().summary()),
+            ..EstimationState::default()
+        };
 
         for (i, cmd) in rdr.enumerate() {
             let cmd = cmd.expect("gcode read");
@@ -223,6 +228,13 @@ impl EstimateCmd {
 
         match self.format {
             OutputFormat::Human => {
+                if let Some(configuration) = &state.configuration {
+                    println!("Configuration: {}", configuration.fingerprint);
+                    for warning in &configuration.warnings {
+                        println!("  Warning: {warning}");
+                    }
+                    println!();
+                }
                 if !state.diagnostics.is_empty() {
                     println!("Diagnostics:");
                     for diagnostic in &state.diagnostics {
