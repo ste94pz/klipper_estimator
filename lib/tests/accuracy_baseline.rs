@@ -33,6 +33,7 @@ struct FixtureMove {
     end: [f64; 4],
     speed: f64,
     accel: Option<f64>,
+    minimum_cruise_ratio: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +95,14 @@ fn estimator_moves(fixture: &Fixture) -> Vec<PlanningMove> {
     for item in &fixture.moves {
         if let Some(accel) = item.accel {
             planner.process_cmd(&parse_gcode(&format!("M204 S{accel}")).unwrap());
+        }
+        if let Some(minimum_cruise_ratio) = item.minimum_cruise_ratio {
+            planner.process_cmd(
+                &parse_gcode(&format!(
+                    "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO={minimum_cruise_ratio}"
+                ))
+                .unwrap(),
+            );
         }
         let relative_e = item.end[3] - previous_e;
         let line = format!(
@@ -234,6 +243,59 @@ fn short_junction_reversal_and_dynamic_limit_baseline() {
         dynamic_moves[2].cruise_v,
         77.540_312_096_354_11,
     );
+}
+
+fn planned_moves(gcode: &[&str]) -> Vec<PlanningMove> {
+    let mut limits = PrinterLimits {
+        max_velocity: 100.0,
+        max_acceleration: 1000.0,
+        square_corner_velocity: 5.0,
+        ..PrinterLimits::default()
+    };
+    limits.set_minimum_cruise_ratio(0.5);
+    let mut planner = Planner::from_limits(limits);
+    for line in gcode {
+        planner.process_cmd(&parse_gcode(line).unwrap());
+    }
+    planner.finalize();
+    planner
+        .iter()
+        .filter_map(|operation| operation.get_move())
+        .collect()
+}
+
+#[test]
+fn queue_flushing_commands_are_lookahead_boundaries() {
+    let continuous = planned_moves(&["G1 X10 F6000", "G1 X20 F6000"]);
+    assert!(continuous[0].end_v > 0.0);
+
+    for boundary in [
+        "M400",
+        "G4 P0",
+        "G28",
+        "M109 S200",
+        "TEMPERATURE_WAIT SENSOR=heater_bed",
+    ] {
+        let moves = planned_moves(&["G1 X10 F6000", boundary, "G1 X20 F6000"]);
+        assert_close(boundary, moves[0].end_v, 0.0);
+        assert_close(boundary, moves[1].start_v, 0.0);
+    }
+}
+
+#[test]
+fn dwell_uses_klippers_zero_default_and_millisecond_duration() {
+    let mut planner = Planner::from_limits(PrinterLimits::default());
+    planner.process_cmd(&parse_gcode("G4").unwrap());
+    planner.process_cmd(&parse_gcode("G4 P250").unwrap());
+    planner.finalize();
+    let durations: Vec<_> = planner
+        .iter()
+        .filter_map(|operation| match operation {
+            PlanningOperation::Delay(delay) => Some(delay.duration().as_secs_f64()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(durations, vec![0.0, 0.25]);
 }
 
 #[test]

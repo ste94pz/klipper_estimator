@@ -6,12 +6,6 @@
     "minimum_cruise_ratio": 0.5,
     "square_corner_velocity": 5.0
   },
-  "known_difference_tolerances": {
-    "accel_t": 0.000001,
-    "cruise_t": 0.000001,
-    "decel_t": 0.000001,
-    "total_t": 0.000001
-  },
   "moves": [
     { "end": [0.0, 0.0, 0.0, 4.0], "speed": 20.0 },
     { "end": [0.0, 0.0, 0.0, 1.0], "speed": 15.0 }

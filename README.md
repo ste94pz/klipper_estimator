@@ -117,6 +117,21 @@ JSON output includes it in the top-level `diagnostics` array. Post-processing
 and `dump-moves` report the same condition on stderr. Such an estimate remains
 a lower bound rather than silently assuming that the command had no effect.
 
+#### Motion planning and velocity limits
+
+The lookahead planner follows Klipper's minimum-cruise-ratio algorithm from the
+pinned reference documented under [Development checks](#development-checks).
+`SET_VELOCITY_LIMIT` supports `VELOCITY`, `ACCEL`,
+`SQUARE_CORNER_VELOCITY`, and `MINIMUM_CRUISE_RATIO`. The former
+`ACCEL_TO_DECEL` parameter and `max_accel_to_decel` configuration field remain
+available only as compatibility adapters for files and configurations produced
+for older Klipper versions; prefer `MINIMUM_CRUISE_RATIO` in new inputs.
+
+Commands that make Klipper wait for or flush queued motion form lookahead
+boundaries in the estimate. This includes `M400`, `G4`, homing, temperature
+waits, and the estimator's existing indeterminate wait operations. Motion on
+the two sides of a boundary therefore starts or ends at rest as appropriate.
+
 ### `estimate` mode
 
 Estimation mode is useful for determining statistics about a print, in order to
@@ -263,9 +278,8 @@ KLIPPER_PATH=/path/to/klipper bash tests/run_klipper_differential.sh
 
 The differential fixtures verify Klipper commit
 `f0892d82b0f1c1228454f09eb508eddde2250f4b`. The test rejects another revision
-instead of silently changing the baseline. Numeric tolerances and the bounded
-extrusion-only sentinel difference are recorded next to the fixtures and test
-code.
+instead of silently changing the baseline. Numeric tolerances and fixture
+provenance are recorded next to the fixtures and test code.
 
 ## Building
 

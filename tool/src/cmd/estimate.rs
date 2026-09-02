@@ -428,10 +428,11 @@ impl DumpMovesState {
             println!("    Flow rate: {:?}", m.flow_rate(1.75 / 2.0));
             println!("    Kind: {}", planner.move_kind_str(&m).unwrap_or("Other"));
             println!("    Acceleration {:.4}", m.acceleration);
-            println!("    Max dv2: {:.4}", m.max_dv2);
+            println!("    Delta v2: {:.4}", m.delta_v2);
             println!("    Max start_v2: {:.4}", m.max_start_v2);
             println!("    Max cruise_v2: {:.4}", m.max_cruise_v2);
-            println!("    Max smoothed_v2: {:.4}", m.max_smoothed_v2);
+            println!("    Next junction_v2: {:.4}", m.next_junction_v2);
+            println!("    Max MCR start_v2: {:.4}", m.max_mcr_start_v2);
             println!(
                 "    Velocity:   {:.3} => {:.3} => {:.3}",
                 m.start_v, m.cruise_v, m.end_v

@@ -1,0 +1,18 @@
+{
+  "name": "dynamic_minimum_cruise_ratio",
+  "limits": {
+    "max_velocity": 120.0,
+    "max_acceleration": 1000.0,
+    "minimum_cruise_ratio": 0.2,
+    "square_corner_velocity": 5.0
+  },
+  "moves": [
+    { "end": [8.0, 0.0, 0.0, 0.0], "speed": 120.0 },
+    {
+      "end": [16.0, 0.0, 0.0, 0.0],
+      "speed": 120.0,
+      "minimum_cruise_ratio": 0.8
+    },
+    { "end": [16.0, 8.0, 0.0, 0.0], "speed": 120.0 }
+  ]
+}

@@ -52,6 +52,13 @@ class ReferenceToolhead:
 
     def set_acceleration(self, acceleration):
         self.max_accel = acceleration
+        self._recalculate()
+
+    def set_minimum_cruise_ratio(self, minimum_cruise_ratio):
+        self.min_cruise_ratio = minimum_cruise_ratio
+        self._recalculate()
+
+    def _recalculate(self):
         scv2 = self.square_corner_velocity**2
         self.junction_deviation = scv2 * (math.sqrt(2.0) - 1.0) / self.max_accel
         self.mcr_pseudo_accel = self.max_accel * (1.0 - self.min_cruise_ratio)
@@ -89,14 +96,18 @@ def main():
     module = load_toolhead(klipper_root)
     toolhead = ReferenceToolhead(fixture["limits"])
     queue = module.LookAheadQueue()
+    emitted = []
     start = [0.0, 0.0, 0.0, 0.0]
     for item in fixture["moves"]:
         if "accel" in item:
             toolhead.set_acceleration(item["accel"])
+        if "minimum_cruise_ratio" in item:
+            toolhead.set_minimum_cruise_ratio(item["minimum_cruise_ratio"])
         move = module.Move(toolhead, start, item["end"], item["speed"])
-        queue.add_move(move)
+        if queue.add_move(move):
+            emitted.extend(queue.flush(lazy=True))
         start = item["end"]
-    moves = queue.flush()
+    moves = emitted + queue.flush()
     print(json.dumps({"name": fixture["name"], "moves": [phase(m) for m in moves]}))
 
 

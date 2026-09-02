@@ -6,7 +6,14 @@
 
 Use printer limits that match the machine which will run the file. The preferred source is Moonraker because Klipper has already resolved configuration defaults and included files. A dumped JSON5 configuration is useful for repeatable or offline estimates.
 
-G-code may change velocity, acceleration, coordinate mode, or extrusion mode during a print. The estimator applies Klipper-compatible coordinate origins, feed and extrusion overrides, saved G-code state, and G-code offsets. Unsupported state-changing commands and macros can reduce accuracy even when the initial printer limits are correct; recognized unsupported state changes are returned as structured diagnostics instead of being silently assigned zero effect.
+G-code may change velocity, acceleration, minimum cruise ratio, coordinate
+mode, or extrusion mode during a print. The estimator applies Klipper-compatible
+lookahead and junction propagation, queue-flush boundaries, coordinate origins,
+feed and extrusion overrides, saved G-code state, and G-code offsets.
+Unsupported state-changing commands and macros can reduce accuracy even when
+the initial printer limits are correct; recognized unsupported state changes
+are returned as structured diagnostics instead of being silently assigned zero
+effect.
 
 ## What is not generally predictable from the file
 

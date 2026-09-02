@@ -143,6 +143,10 @@ impl Planner {
                     self.toolhead_state
                         .set_extrude_factor(params.get_number::<f64>('S').unwrap_or(100.0));
                 }
+                ('M', 400) => {
+                    self.operations.add_flush_boundary();
+                    return 1;
+                }
                 ('M', 204) => {
                     let s = params.get_number::<f64>('S');
                     let p = params.get_number::<f64>('P');
@@ -167,11 +171,14 @@ impl Planner {
                     if let Some(v) = params.get_number::<f64>("accel") {
                         self.toolhead_state.limits.set_max_acceleration(v);
                     }
-                    if let Some(v) = params.get_number::<f64>("accel_to_decel") {
-                        self.toolhead_state.limits.set_max_accel_to_decel(v);
-                    }
                     if let Some(v) = params.get_number::<f64>("square_corner_velocity") {
                         self.toolhead_state.limits.set_square_corner_velocity(v);
+                    }
+                    if let Some(v) = params.get_number::<f64>("minimum_cruise_ratio") {
+                        self.toolhead_state.limits.set_minimum_cruise_ratio(v);
+                    } else if let Some(v) = params.get_number::<f64>("accel_to_decel") {
+                        // Compatibility adapter for G-code emitted for older Klipper releases.
+                        self.toolhead_state.limits.set_max_accel_to_decel(v);
                     }
                 }
                 "set_retraction" => {
@@ -300,7 +307,9 @@ impl Planner {
                 code: 4,
                 params,
             } => Some(Delay::Pause(Duration::from_secs_f64(
-                params.get_number('P').map_or(0.25, |v: f64| v / 1000.0),
+                params
+                    .get_number('P')
+                    .map_or(0.0, |v: f64| (v / 1000.0).max(0.0)),
             ))),
             GCodeOperation::Traditional {
                 letter: 'G',
@@ -455,9 +464,10 @@ pub struct PlanningMove {
     pub junction_deviation: f64,
     pub max_start_v2: f64,
     pub max_cruise_v2: f64,
-    pub max_dv2: f64,
-    pub max_smoothed_v2: f64,
-    pub smoothed_dv2: f64,
+    pub delta_v2: f64,
+    pub next_junction_v2: f64,
+    pub max_mcr_start_v2: f64,
+    pub mcr_delta_v2: f64,
 
     pub kind: Option<Kind>,
 
@@ -487,13 +497,15 @@ impl PlanningMove {
             distance: (start.w - end.w).abs(),
             rate: dirs * inv_move_d,
             requested_velocity: toolhead_state.velocity,
-            acceleration: f64::MAX,
+            // klippy/toolhead.py:Move at the pinned Klipper reference commit.
+            acceleration: 99_999_999.9,
             junction_deviation: toolhead_state.limits.junction_deviation,
             max_start_v2: 0.0,
             max_cruise_v2: toolhead_state.velocity * toolhead_state.velocity,
-            max_dv2: f64::MAX,
-            max_smoothed_v2: 0.0,
-            smoothed_dv2: f64::MAX,
+            delta_v2: 2.0 * move_d * 99_999_999.9,
+            next_junction_v2: 999_999_999.9,
+            max_mcr_start_v2: 0.0,
+            mcr_delta_v2: 2.0 * move_d * toolhead_state.limits.mcr_pseudo_accel,
             kind: None,
 
             start_v: 0.0,
@@ -518,9 +530,10 @@ impl PlanningMove {
             junction_deviation: toolhead_state.limits.junction_deviation,
             max_start_v2: 0.0,
             max_cruise_v2: velocity * velocity,
-            max_dv2: 2.0 * distance * toolhead_state.limits.max_acceleration,
-            max_smoothed_v2: 0.0,
-            smoothed_dv2: 2.0 * distance * toolhead_state.limits.accel_to_decel,
+            delta_v2: 2.0 * distance * toolhead_state.limits.max_acceleration,
+            next_junction_v2: 999_999_999.9,
+            max_mcr_start_v2: 0.0,
+            mcr_delta_v2: 2.0 * distance * toolhead_state.limits.mcr_pseudo_accel,
             kind: None,
 
             start_v: 0.0,
@@ -534,32 +547,30 @@ impl PlanningMove {
             return;
         }
 
-        let mut junction_cos_theta = -self.rate.xyz().dot(previous_move.rate.xyz());
-        if junction_cos_theta > 0.999999 {
-            // Move was not at an angle, skip all this
-            return;
-        }
-        junction_cos_theta = junction_cos_theta.max(-0.999999);
-        let sin_theta_d2 = (0.5 * (1.0 - junction_cos_theta)).sqrt();
-        let r = sin_theta_d2 / (1.0 - sin_theta_d2);
-        let tan_theta_d2 = sin_theta_d2 / (0.5 * (1.0 + junction_cos_theta)).sqrt();
-        let move_centripetal_v2 = 0.5 * self.distance * tan_theta_d2 * self.acceleration;
-        let prev_move_centripetal_v2 =
-            0.5 * previous_move.distance * tan_theta_d2 * previous_move.acceleration;
-
         let extruder_v2 = toolhead_state.extruder_junction_speed_v2(self, previous_move);
-
-        self.max_start_v2 = extruder_v2
-            .min(r * self.junction_deviation * self.acceleration)
-            .min(r * previous_move.junction_deviation * previous_move.acceleration)
-            .min(move_centripetal_v2)
-            .min(prev_move_centripetal_v2)
+        let mut max_start_v2 = extruder_v2
             .min(self.max_cruise_v2)
             .min(previous_move.max_cruise_v2)
-            .min(previous_move.max_start_v2 + previous_move.max_dv2);
-        self.max_smoothed_v2 = self
-            .max_start_v2
-            .min(previous_move.max_smoothed_v2 + previous_move.smoothed_dv2);
+            .min(previous_move.next_junction_v2)
+            .min(previous_move.max_start_v2 + previous_move.delta_v2);
+
+        // Port of klippy/toolhead.py:Move.calc_junction at the pinned reference commit.
+        let junction_cos_theta = -self.rate.xyz().dot(previous_move.rate.xyz());
+        let sin_theta_d2 = (0.5 * (1.0 - junction_cos_theta)).max(0.0).sqrt();
+        let cos_theta_d2 = (0.5 * (1.0 + junction_cos_theta)).max(0.0).sqrt();
+        let one_minus_sin_theta_d2 = 1.0 - sin_theta_d2;
+        if one_minus_sin_theta_d2 > 0.0 && cos_theta_d2 > 0.0 {
+            let r_jd = sin_theta_d2 / one_minus_sin_theta_d2;
+            let quarter_tan_theta_d2 = 0.25 * sin_theta_d2 / cos_theta_d2;
+            max_start_v2 = max_start_v2
+                .min(r_jd * self.junction_deviation * self.acceleration)
+                .min(r_jd * previous_move.junction_deviation * previous_move.acceleration)
+                .min(self.delta_v2 * quarter_tan_theta_d2)
+                .min(previous_move.delta_v2 * quarter_tan_theta_d2);
+        }
+        self.max_start_v2 = max_start_v2;
+        self.max_mcr_start_v2 =
+            max_start_v2.min(previous_move.max_mcr_start_v2 + previous_move.mcr_delta_v2);
     }
 
     fn set_junction(&mut self, start_v2: f64, cruise_v2: f64, end_v2: f64) {
@@ -608,8 +619,16 @@ impl PlanningMove {
             self.max_cruise_v2 = v2;
         }
         self.acceleration = self.acceleration.min(acceleration);
-        self.max_dv2 = 2.0 * self.distance * self.acceleration;
-        self.smoothed_dv2 = self.smoothed_dv2.min(self.max_dv2);
+        self.delta_v2 = 2.0 * self.distance * self.acceleration;
+        self.mcr_delta_v2 = self.mcr_delta_v2.min(self.delta_v2);
+    }
+
+    pub fn limit_next_junction_speed(&mut self, velocity: f64) {
+        self.next_junction_v2 = self.next_junction_v2.min(velocity * velocity);
+    }
+
+    fn min_move_time(&self) -> f64 {
+        self.distance / self.max_cruise_v2.sqrt()
     }
 
     pub fn delta(&self) -> Vec4 {
@@ -693,6 +712,13 @@ impl OperationSequence {
         }
     }
 
+    pub(crate) fn add_flush_boundary(&mut self) {
+        if let Some(OperationSequenceOperation::MoveSequence(ms)) = self.ops.back_mut() {
+            ms.flush();
+        }
+        self.ops.push_back(OperationSequenceOperation::Fill);
+    }
+
     pub(crate) fn flush(&mut self) {
         for o in self.ops.iter_mut() {
             if let OperationSequenceOperation::MoveSequence(ms) = o {
@@ -716,29 +742,36 @@ impl OperationSequence {
 
 #[derive(Debug)]
 enum MoveSequenceOperation {
-    Move(PlanningMove),
+    Move(Box<PlanningMove>),
     Fill,
-}
-
-impl MoveSequenceOperation {
-    fn is_fill(&self) -> bool {
-        matches!(self, MoveSequenceOperation::Fill)
-    }
 }
 
 impl From<MoveSequenceOperation> for PlanningOperation {
     fn from(mso: MoveSequenceOperation) -> Self {
         match mso {
-            MoveSequenceOperation::Move(m) => PlanningOperation::Move(m),
+            MoveSequenceOperation::Move(m) => PlanningOperation::Move(*m),
             MoveSequenceOperation::Fill => PlanningOperation::Fill,
         }
     }
 }
 
-#[derive(Debug, Default)]
+const LOOKAHEAD_FLUSH_TIME: f64 = 0.150;
+
+#[derive(Debug)]
 pub struct MoveSequence {
     moves: VecDeque<MoveSequenceOperation>,
     flush_count: usize,
+    junction_flush: f64,
+}
+
+impl Default for MoveSequence {
+    fn default() -> Self {
+        Self {
+            moves: VecDeque::new(),
+            flush_count: 0,
+            junction_flush: LOOKAHEAD_FLUSH_TIME,
+        }
+    }
 }
 
 impl MoveSequence {
@@ -751,96 +784,127 @@ impl MoveSequence {
             self.add_fill();
             return;
         }
-        if let Some(prev_move) = self.last_move() {
+        let has_previous = if let Some(prev_move) = self.last_pending_move() {
             move_cmd.apply_junction(prev_move, toolhead_state);
+            true
+        } else {
+            false
+        };
+        let min_move_time = move_cmd.min_move_time();
+        self.moves
+            .push_back(MoveSequenceOperation::Move(Box::new(move_cmd)));
+        if has_previous {
+            self.junction_flush -= min_move_time;
+            if self.junction_flush <= 0.0 {
+                self.process(true);
+            }
         }
-        self.moves.push_back(MoveSequenceOperation::Move(move_cmd));
     }
 
     fn is_empty(&self) -> bool {
         self.moves.is_empty()
     }
 
-    fn last_move(&self) -> Option<&PlanningMove> {
-        self.moves.iter().rev().find_map(|o| match o {
-            MoveSequenceOperation::Move(m) => Some(m),
-            _ => None,
-        })
+    fn last_pending_move(&self) -> Option<&PlanningMove> {
+        self.moves
+            .iter()
+            .skip(self.flush_count)
+            .rev()
+            .find_map(|o| match o {
+                MoveSequenceOperation::Move(m) => Some(m.as_ref()),
+                _ => None,
+            })
     }
 
-    fn process(&mut self, partial: bool) {
-        if self.flush_count == self.moves.len() {
-            // If there's nothing to flush, bail quickly
+    /// Port of `klippy/toolhead.py:LookAheadQueue.flush` at the pinned Klipper
+    /// reference commit. `Fill` entries carry estimator metadata, but do not
+    /// participate in Klipper's move queue.
+    fn process(&mut self, lazy: bool) {
+        self.junction_flush = LOOKAHEAD_FLUSH_TIME;
+        let move_indices: Vec<_> = self
+            .moves
+            .iter()
+            .enumerate()
+            .skip(self.flush_count)
+            .filter_map(|(index, operation)| match operation {
+                MoveSequenceOperation::Move(_) => Some(index),
+                MoveSequenceOperation::Fill => None,
+            })
+            .collect();
+        if move_indices.is_empty() {
+            if !lazy {
+                self.flush_count = self.moves.len();
+            }
             return;
         }
 
-        let mut delayed: Vec<(&mut PlanningMove, f64, f64)> = Vec::new();
-
-        let mut next_end_v2 = 0.0;
-        let mut next_smoothed_v2 = 0.0;
+        let mut junction_info = vec![None; move_indices.len()];
+        let mut next_start_v2 = 0.0;
+        let mut next_mcr_start_v2 = 0.0;
         let mut peak_cruise_v2 = 0.0;
+        let mut pending_cruise_assignments = 0usize;
+        let mut update_flush_count = lazy;
+        let mut flush_moves = move_indices.len();
 
-        let mut update_flush_count = partial;
-        let skip = if partial { self.flush_count } else { 0 };
-        if !partial {
-            self.flush_count = self.moves.len();
-        }
-
-        for (idx, m) in self.moves.iter_mut().enumerate().skip(skip).rev() {
-            if let MoveSequenceOperation::Move(m) = m {
-                let reachable_start_v2 = next_end_v2 + m.max_dv2;
-                let start_v2 = m.max_start_v2.min(reachable_start_v2);
-                let reachable_smoothed_v2 = next_smoothed_v2 + m.smoothed_dv2;
-                let smoothed_v2 = m.max_smoothed_v2.min(reachable_smoothed_v2);
-                if smoothed_v2 < reachable_smoothed_v2 {
-                    if (smoothed_v2 + m.smoothed_dv2 > next_smoothed_v2) || !delayed.is_empty() {
-                        if update_flush_count && peak_cruise_v2 != 0.0 {
-                            self.flush_count = idx;
-                            update_flush_count = false;
-                        }
-
-                        peak_cruise_v2 = m
-                            .max_cruise_v2
-                            .min((smoothed_v2 + reachable_smoothed_v2) * 0.5);
-
-                        if !delayed.is_empty() {
-                            if !update_flush_count && idx < self.flush_count {
-                                let mut mc_v2 = peak_cruise_v2;
-                                for (m, ms_v2, me_v2) in delayed.iter_mut().rev() {
-                                    mc_v2 = mc_v2.min(*ms_v2);
-                                    m.set_junction(ms_v2.min(mc_v2), mc_v2, me_v2.min(mc_v2));
-                                }
-                            }
-                            delayed.clear();
-                        }
+        for queue_index in (0..move_indices.len()).rev() {
+            let operation_index = move_indices[queue_index];
+            let m = match &self.moves[operation_index] {
+                MoveSequenceOperation::Move(m) => m,
+                MoveSequenceOperation::Fill => unreachable!(),
+            };
+            let reachable_start_v2 = next_start_v2 + m.delta_v2;
+            let start_v2 = m.max_start_v2.min(reachable_start_v2);
+            let mut cruise_v2 = None;
+            pending_cruise_assignments += 1;
+            let reachable_mcr_start_v2 = next_mcr_start_v2 + m.mcr_delta_v2;
+            let mcr_start_v2 = m.max_mcr_start_v2.min(reachable_mcr_start_v2);
+            if mcr_start_v2 < reachable_mcr_start_v2 {
+                if mcr_start_v2 + m.mcr_delta_v2 > next_mcr_start_v2
+                    || pending_cruise_assignments > 1
+                {
+                    if update_flush_count && peak_cruise_v2 != 0.0 {
+                        flush_moves = queue_index + pending_cruise_assignments;
+                        update_flush_count = false;
                     }
-
-                    if !update_flush_count && idx < self.flush_count {
-                        let cruise_v2 = ((start_v2 + reachable_start_v2) * 0.5)
-                            .min(m.max_cruise_v2)
-                            .min(peak_cruise_v2);
-                        m.set_junction(
-                            start_v2.min(cruise_v2),
-                            cruise_v2,
-                            next_end_v2.min(cruise_v2),
-                        );
-                    }
-                } else {
-                    delayed.push((m, start_v2, next_end_v2));
+                    peak_cruise_v2 = (mcr_start_v2 + reachable_mcr_start_v2) * 0.5;
                 }
-                next_end_v2 = start_v2;
-                next_smoothed_v2 = smoothed_v2;
+                cruise_v2 = Some(
+                    ((start_v2 + reachable_start_v2) * 0.5)
+                        .min(m.max_cruise_v2)
+                        .min(peak_cruise_v2),
+                );
+                pending_cruise_assignments = 0;
             }
+            junction_info[queue_index] = Some((start_v2, cruise_v2, next_start_v2));
+            next_start_v2 = start_v2;
+            next_mcr_start_v2 = mcr_start_v2;
         }
 
-        if update_flush_count {
-            self.flush_count = 0;
+        if update_flush_count || flush_moves == 0 {
+            return;
         }
 
-        // Advance while the next operation is a fill
-        while self.flush_count < self.moves.len() && self.moves[self.flush_count].is_fill() {
-            self.flush_count += 1;
+        let mut previous_cruise_v2: f64 = 0.0;
+        for queue_index in 0..flush_moves {
+            let operation_index = move_indices[queue_index];
+            let (start_v2, cruise_v2, next_start_v2) = junction_info[queue_index].unwrap();
+            let cruise_v2 = cruise_v2.unwrap_or_else(|| previous_cruise_v2.min(start_v2));
+            match &mut self.moves[operation_index] {
+                MoveSequenceOperation::Move(m) => m.set_junction(
+                    start_v2.min(cruise_v2),
+                    cruise_v2,
+                    next_start_v2.min(cruise_v2),
+                ),
+                MoveSequenceOperation::Fill => unreachable!(),
+            }
+            previous_cruise_v2 = cruise_v2;
         }
+
+        self.flush_count = if flush_moves < move_indices.len() {
+            move_indices[flush_moves]
+        } else {
+            self.moves.len()
+        };
     }
 
     fn flush(&mut self) {
@@ -848,7 +912,9 @@ impl MoveSequence {
     }
 
     fn next_move(&mut self) -> Option<PlanningOperation> {
-        self.process(true);
+        if self.flush_count == 0 {
+            self.process(true);
+        }
         if self.flush_count == 0 {
             return None;
         }
@@ -875,7 +941,7 @@ pub struct PrinterLimits {
     #[serde(skip)]
     pub junction_deviation: f64,
     #[serde(skip)]
-    pub accel_to_decel: f64,
+    pub mcr_pseudo_accel: f64,
     pub instant_corner_velocity: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_retraction: Option<FirmwareRetractionOptions>,
@@ -895,7 +961,7 @@ impl Default for PrinterLimits {
             minimum_cruise_ratio: None,
             square_corner_velocity: 5.0,
             junction_deviation: Self::scv_to_jd(5.0, 100000.0),
-            accel_to_decel: 50.0,
+            mcr_pseudo_accel: 50.0,
             instant_corner_velocity: 1.0,
             move_checkers: vec![],
             firmware_retraction: None,
@@ -956,7 +1022,7 @@ impl PrinterLimits {
     }
 
     fn update_accel_to_decel(&mut self) {
-        self.accel_to_decel = match (self.minimum_cruise_ratio, self.max_accel_to_decel) {
+        self.mcr_pseudo_accel = match (self.minimum_cruise_ratio, self.max_accel_to_decel) {
             (Some(v), _) => self.max_acceleration * (1.0 - v.clamp(0.0, 1.0)),
             (_, Some(v)) => v.min(self.max_acceleration),
             _ => 50.0f64.min(self.max_acceleration),

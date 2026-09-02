@@ -1,0 +1,19 @@
+{
+  "name": "lazy_flush",
+  "limits": {
+    "max_velocity": 20.0,
+    "max_acceleration": 400.0,
+    "minimum_cruise_ratio": 0.5,
+    "square_corner_velocity": 5.0
+  },
+  "moves": [
+    { "end": [1.0, 0.0, 0.0, 0.0], "speed": 20.0 },
+    { "end": [2.0, 0.2, 0.0, 0.0], "speed": 20.0 },
+    { "end": [3.0, 0.0, 0.0, 0.0], "speed": 20.0 },
+    { "end": [4.0, 0.2, 0.0, 0.0], "speed": 20.0 },
+    { "end": [5.0, 0.0, 0.0, 0.0], "speed": 20.0 },
+    { "end": [6.0, 0.2, 0.0, 0.0], "speed": 20.0 },
+    { "end": [7.0, 0.0, 0.0, 0.0], "speed": 20.0 },
+    { "end": [8.0, 0.2, 0.0, 0.0], "speed": 20.0 }
+  ]
+}
