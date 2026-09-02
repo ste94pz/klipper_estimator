@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,7 @@ use lib_klipper::gcode::{
 use lib_klipper::planner::Planner;
 use lib_klipper::slicer::SlicerPreset;
 
+use crate::calibration::{fingerprint_reader, CalibrationMarker, CALIBRATION_MARKER_PREFIX};
 use crate::duration::DurationEstimate;
 use crate::Opts;
 
@@ -419,7 +420,7 @@ impl PostProcessCmd {
         runner.state
     }
 
-    fn apply_changes(&self, mut state: PostProcessState) {
+    fn apply_changes(&self, mut state: PostProcessState, configuration_fingerprint: &str) {
         let src = File::open(&self.filename).expect("opening gcode file failed");
         let rdr = BufReader::new(src);
 
@@ -435,6 +436,9 @@ impl PostProcessCmd {
 
         for line in rdr.lines() {
             let line = line.expect("IO error");
+            if line.starts_with(CALIBRATION_MARKER_PREFIX) {
+                continue;
+            }
             if let Ok(cmd) = parse_gcode(&line) {
                 if let Some(cmd) = state.gcode_interceptor.output_process(&cmd, &state.result) {
                     writeln!(wr, "{}", cmd).expect("IO error");
@@ -450,7 +454,7 @@ impl PostProcessCmd {
             wr,
             "; Processed by klipper_estimator {}, {}",
             env!("TOOL_VERSION"),
-            if let Some(slicer) = state.result.slicer {
+            if let Some(slicer) = state.result.slicer.as_ref() {
                 format!("detected slicer {}", slicer)
             } else {
                 "no slicer detected".into()
@@ -458,14 +462,30 @@ impl PostProcessCmd {
         )
         .expect("IO error");
 
-        // Flush output file before renaming
+        // The marker hashes every preceding byte and is deliberately excluded from its own hash.
         wr.flush().expect("IO error");
+        drop(wr);
+        let gcode_fingerprint = fingerprint_reader(
+            File::open(&dst_path).expect("opening processed G-code for hashing failed"),
+        )
+        .expect("hashing processed G-code failed");
+        let marker = CalibrationMarker::new(
+            configuration_fingerprint.into(),
+            gcode_fingerprint,
+            state.result.duration.expected_total_time,
+        );
+        let mut dst = OpenOptions::new()
+            .append(true)
+            .open(&dst_path)
+            .expect("opening processed G-code for calibration marker failed");
+        writeln!(dst, "{}", marker.to_comment()).expect("writing calibration marker failed");
         std::fs::rename(&dst_path, &self.filename).expect("rename failed");
     }
 
     pub fn run(&self, opts: &Opts) {
         let state = self.estimate(opts);
-        self.apply_changes(state);
+        let configuration_fingerprint = opts.config_snapshot().fingerprint.clone();
+        self.apply_changes(state, &configuration_fingerprint);
     }
 }
 

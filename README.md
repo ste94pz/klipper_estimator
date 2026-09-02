@@ -302,6 +302,43 @@ constant. Consequently, `expected_total_time` is still a lower bound whenever
 that array is non-empty. Human output and structured planner diagnostics expose
 the same condition.
 
+History calibration is opt-in and requires a live Moonraker configuration:
+
+```
+./klipper_estimator \
+    --config_moonraker_url http://192.168.0.21 \
+    estimate print.gcode --history_calibration
+```
+
+The estimator reads `GET /server/history/list` and the associated G-code files;
+it never modifies Moonraker history. A `post-process` run writes a final
+calibration marker containing the configuration fingerprint, the uncalibrated
+expected-time baseline, and a SHA-256 fingerprint of every preceding G-code
+byte. A history record is usable only when Moonraker reports a completed,
+unchanged file, its metadata identifies `klipper_estimator` as a file
+processor, the marker hash verifies, and its configuration fingerprint matches
+the current estimate.
+
+Cancelled, failed, missing, modified, stale, mismatched, and unverifiable jobs
+are rejected. Moonraker history does not expose an explicit paused flag, so the
+estimator conservatively rejects records whose `total_duration` and
+`print_duration` differ by more than one second. This can also reject jobs with
+other non-printing intervals; rejected counts remain visible in the output.
+By default the latest 50 records are inspected, observations older than 90 days
+are rejected, and at least three verified observations are required. These
+values can be changed with `--history_calibration_limit`,
+`--history_calibration_max_age_days`, and
+`--history_calibration_min_samples`.
+
+The model adds the median historical residual to the file-level
+`expected_total_time`, never reducing it below `deterministic_time`. JSON output
+includes model version, sample count and age, applicability keys, median
+absolute error, root mean squared error, rejected-sample counts, and an
+empirical 80% residual interval. Sequence estimates remain uncalibrated because
+the observed overhead cannot be assigned reliably to individual sequences.
+Historical files processed before calibration markers were introduced are
+reported as unverifiable rather than accepted by filename alone.
+
 See [Estimate scope and accuracy](doc/accuracy.md) for practical guidance on
 configuration, repeatability, and interpreting the result.
 

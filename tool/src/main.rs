@@ -7,6 +7,7 @@ use once_cell::sync::OnceCell;
 #[macro_use]
 extern crate lazy_static;
 
+mod calibration;
 mod cmd;
 mod config_snapshot;
 mod duration;
@@ -64,6 +65,11 @@ pub struct Opts {
 }
 
 impl Opts {
+    fn moonraker_connection(&self) -> Option<(&str, Option<&str>)> {
+        self.config_moonraker
+            .as_deref()
+            .map(|url| (url, self.config_moonraker_api_key.as_deref()))
+    }
     fn printer_limits(&self) -> &PrinterLimits {
         &self.config_snapshot().limits
     }

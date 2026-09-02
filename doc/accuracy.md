@@ -99,6 +99,38 @@ Jinja. A homing or probing contract is deterministic only when the configured
 duration and complete resulting state apply to every invocation. Without such
 a contract, the output stays usable but explicitly remains a lower bound.
 
+## History calibration
+
+Optional Moonraker history calibration estimates a machine-specific residual
+on top of the uncalibrated `expected_total_time`. It uses the median residual
+from verified observations and reports model version, sample count, observation
+age, applicability keys, median absolute error, root mean squared error, and an
+empirical 80% interval. The deterministic result is always retained. A negative
+residual may reduce the expected result, but never below `deterministic_time`.
+
+Selection is deliberately fail-closed. A sample must have status `completed`,
+refer to a file Moonraker reports as existing and unchanged, carry a non-empty
+metadata UUID, identify `klipper_estimator` in `file_processors`, and contain a
+valid final calibration marker. The marker binds the baseline estimate to both
+the exact processed G-code bytes and the configuration fingerprint. Filename
+equality alone is not accepted. Samples with another configuration, an expired
+age, invalid durations, or an extreme residual are rejected with a
+machine-readable reason.
+
+The [Moonraker history API](https://moonraker.readthedocs.io/en/latest/external_api/history/)
+does not distinguish a completed print that was paused. Calibration therefore
+accepts only records whose `print_duration` and `total_duration` differ by no
+more than one second. This conservative rule can reject legitimate jobs with
+non-printing intervals, but prevents known pauses from being learned as normal
+overhead. If too few samples remain, calibration is not applied and the output
+explains why. Requests are read-only and history calibration is never enabled
+implicitly.
+
+The learned residual applies only to the whole-file result. Per-sequence values
+remain uncalibrated because history provides no evidence for distributing
+machine overhead among sequences. Files processed by older estimator versions
+without a calibration marker are unverifiable and are not training samples.
+
 ## Getting repeatable results
 
 1. Generate the estimate with the configuration of the target printer.

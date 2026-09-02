@@ -1,0 +1,78 @@
+{
+  "result": {
+    "jobs": [
+      {
+        "exists": true,
+        "status": "completed",
+        "filename": "valid-1.gcode",
+        "end_time": 950.0,
+        "print_duration": 109.0,
+        "total_duration": 109.0,
+        "metadata": { "uuid": "valid-1", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": true,
+        "status": "completed",
+        "filename": "valid-2.gcode",
+        "end_time": 900.0,
+        "print_duration": 110.0,
+        "total_duration": 110.0,
+        "metadata": { "uuid": "valid-2", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": true,
+        "status": "completed",
+        "filename": "valid-3.gcode",
+        "end_time": 850.0,
+        "print_duration": 111.0,
+        "total_duration": 111.0,
+        "metadata": { "uuid": "valid-3", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": true,
+        "status": "cancelled",
+        "filename": "cancelled.gcode",
+        "end_time": 900.0,
+        "print_duration": 110.0,
+        "total_duration": 110.0,
+        "metadata": { "uuid": "cancelled", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": true,
+        "status": "completed",
+        "filename": "stale.gcode",
+        "end_time": 400.0,
+        "print_duration": 110.0,
+        "total_duration": 110.0,
+        "metadata": { "uuid": "stale", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": false,
+        "status": "completed",
+        "filename": "modified.gcode",
+        "end_time": 900.0,
+        "print_duration": 110.0,
+        "total_duration": 110.0,
+        "metadata": { "uuid": "modified", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": true,
+        "status": "completed",
+        "filename": "wrong-config.gcode",
+        "end_time": 900.0,
+        "print_duration": 110.0,
+        "total_duration": 110.0,
+        "metadata": { "uuid": "wrong-config", "file_processors": ["klipper_estimator"] }
+      },
+      {
+        "exists": true,
+        "status": "completed",
+        "filename": "paused.gcode",
+        "end_time": 900.0,
+        "print_duration": 100.0,
+        "total_duration": 110.0,
+        "metadata": { "uuid": "paused", "file_processors": ["klipper_estimator"] }
+      }
+    ]
+  }
+}

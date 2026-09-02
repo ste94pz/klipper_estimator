@@ -95,7 +95,7 @@ impl DurationEstimate {
             .or_default() += duration;
     }
 
-    fn add_expected(&mut self, category: &str, duration: f64) {
+    pub(crate) fn add_expected(&mut self, category: &str, duration: f64) {
         self.expected_total_time += duration;
         self.total_time = self.expected_total_time;
         *self

@@ -10,6 +10,7 @@ use clap::Parser;
 use ordered_float::NotNan;
 use serde::{ser::SerializeSeq, Serialize, Serializer};
 
+use crate::calibration::{fetch_history_calibration, CalibrationReport};
 use crate::config_snapshot::ConfigSnapshotSummary;
 use crate::duration::DurationEstimate;
 use crate::Opts;
@@ -55,11 +56,25 @@ pub struct EstimateCmd {
     omit_move_kinds: bool,
     #[clap(long)]
     omit_layer_times: bool,
+    /// Calibrate expected time from verified, completed Moonraker history jobs
+    #[clap(long = "history_calibration")]
+    history_calibration: bool,
+    /// Maximum number of recent Moonraker history records to inspect
+    #[clap(long = "history_calibration_limit", default_value_t = 50)]
+    history_calibration_limit: usize,
+    /// Reject calibration observations older than this many days
+    #[clap(long = "history_calibration_max_age_days", default_value_t = 90)]
+    history_calibration_max_age_days: u64,
+    /// Minimum verified observations required to apply calibration
+    #[clap(long = "history_calibration_min_samples", default_value_t = 3)]
+    history_calibration_min_samples: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 struct EstimationState {
     configuration: Option<ConfigSnapshotSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calibration: Option<CalibrationReport>,
     #[serde(flatten)]
     duration: DurationEstimate,
     sequences: Vec<EstimationSequence>,
@@ -269,6 +284,36 @@ impl EstimateCmd {
         }
         state.diagnostics = planner.diagnostics().to_vec();
 
+        if self.history_calibration {
+            let fingerprint = state
+                .configuration
+                .as_ref()
+                .expect("estimate configuration is always present")
+                .fingerprint
+                .clone();
+            let mut calibration = match opts.moonraker_connection() {
+                Some((url, api_key)) if self.history_calibration_limit > 0 => {
+                    fetch_history_calibration(
+                        url,
+                        api_key,
+                        &fingerprint,
+                        self.history_calibration_limit,
+                        self.history_calibration_max_age_days
+                            .saturating_mul(24 * 60 * 60),
+                        self.history_calibration_min_samples.max(1),
+                    )
+                }
+                Some(_) => CalibrationReport::unavailable(
+                    "history calibration limit must be greater than zero",
+                ),
+                None => CalibrationReport::unavailable(
+                    "history calibration requires --config_moonraker_url",
+                ),
+            };
+            calibration.apply(&mut state.duration);
+            state.calibration = Some(calibration);
+        }
+
         match self.format {
             OutputFormat::Human => {
                 if let Some(configuration) = &state.configuration {
@@ -291,6 +336,30 @@ impl EstimateCmd {
                         println!(
                             "  {} ({:?}): {}",
                             omitted.command, omitted.category, omitted.reason
+                        );
+                    }
+                    println!();
+                }
+                if let Some(calibration) = &state.calibration {
+                    println!("History calibration: {:?}", calibration.status);
+                    if let Some(reason) = &calibration.reason {
+                        println!("  Reason: {reason}");
+                    }
+                    if let Some(model) = &calibration.model {
+                        println!("  Samples: {}", model.sample_count);
+                        println!("  Median residual: {:.3}s", model.median_residual);
+                    }
+                    if let Some(prediction) = &calibration.prediction {
+                        println!(
+                            "  Expected total: {} ({:.3}s)",
+                            format_time(prediction.expected_total_time),
+                            prediction.expected_total_time
+                        );
+                        println!(
+                            "  {:.0}% interval: {:.3}s .. {:.3}s",
+                            prediction.confidence * 100.0,
+                            prediction.lower,
+                            prediction.upper
                         );
                     }
                     println!();
