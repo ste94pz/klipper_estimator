@@ -11,6 +11,7 @@ use ordered_float::NotNan;
 use serde::{ser::SerializeSeq, Serialize, Serializer};
 
 use crate::config_snapshot::ConfigSnapshotSummary;
+use crate::duration::DurationEstimate;
 use crate::Opts;
 
 fn format_time(mut seconds: f64) -> String {
@@ -59,13 +60,16 @@ pub struct EstimateCmd {
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 struct EstimationState {
     configuration: Option<ConfigSnapshotSummary>,
+    #[serde(flatten)]
+    duration: DurationEstimate,
     sequences: Vec<EstimationSequence>,
     diagnostics: Vec<PlannerDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 struct EstimationSequence {
-    total_time: f64,
+    #[serde(flatten)]
+    duration: DurationEstimate,
     total_distance: f64,
     total_extrude_distance: f64,
     max_flow: Option<f64>,
@@ -112,12 +116,13 @@ fn serialize_layer_times<S: Serializer>(
 
 impl EstimationState {
     fn add(&mut self, planner: &Planner, op: &PlanningOperation) {
+        self.duration.add_operation(planner, op);
         match op {
             PlanningOperation::Move(m) => self.add_move(planner, m),
-            PlanningOperation::Delay(Delay::Pause(t)) => {
+            PlanningOperation::Delay(Delay::Dwell(t)) => {
                 let t = t.as_secs_f64();
                 let seq = self.get_cur_seq();
-                seq.total_time += t;
+                seq.duration.add_deterministic("dwell", t);
                 let kind = "Dwell";
                 if let Some(kt) = seq.kind_times.get_mut(kind) {
                     *kt += t;
@@ -125,7 +130,7 @@ impl EstimationState {
                     seq.kind_times.insert(kind.to_string(), t);
                 }
             }
-            PlanningOperation::Delay(Delay::Indeterminate(t, k)) => {
+            PlanningOperation::Delay(Delay::EstimatorAddition { duration, kind }) => {
                 // If current sequence has moves or there is no sequence, make a new one
                 if self
                     .sequences
@@ -136,14 +141,33 @@ impl EstimationState {
                     self.sequences.push(EstimationSequence::default());
                 }
                 let seq = self.sequences.last_mut().unwrap();
-                let t = t.as_secs_f64();
-                seq.total_time += t;
-                let kind = planner.kind_str(k).unwrap_or("Other");
+                let t = duration.as_secs_f64();
+                seq.duration.add_operation(planner, op);
+                let kind = planner.kind_str(kind).unwrap_or("Other");
                 if let Some(kt) = seq.kind_times.get_mut(kind) {
                     *kt += t;
                 } else {
                     seq.kind_times.insert(kind.to_string(), t);
                 }
+            }
+            PlanningOperation::Delay(Delay::Contract { .. }) => {
+                let seq = self.get_cur_seq();
+                seq.duration.add_operation(planner, op);
+            }
+            PlanningOperation::Delay(Delay::Unknown { .. }) => {
+                if self
+                    .sequences
+                    .last()
+                    .map(|sequence| sequence.num_moves != 0)
+                    .unwrap_or(true)
+                {
+                    self.sequences.push(EstimationSequence::default());
+                }
+                self.sequences
+                    .last_mut()
+                    .expect("sequence was just initialized")
+                    .duration
+                    .add_operation(planner, op);
             }
             _ => {}
         }
@@ -158,11 +182,8 @@ impl EstimationState {
 
     fn add_move(&mut self, planner: &Planner, m: &PlanningMove) {
         let seq = self.get_cur_seq();
-        if seq.num_moves == 0 {
-            seq.total_time += 0.25;
-        }
-
-        seq.total_time += m.total_time();
+        seq.duration
+            .add_operation(planner, &PlanningOperation::Move(*m));
         seq.total_distance += m.distance;
         let extrusion_delta = m.end.w - m.start.w;
         seq.total_extrude_distance += extrusion_delta;
@@ -264,6 +285,16 @@ impl EstimateCmd {
                     }
                     println!();
                 }
+                if !state.duration.omitted_duration_components.is_empty() {
+                    println!("Omitted duration components:");
+                    for omitted in &state.duration.omitted_duration_components {
+                        println!(
+                            "  {} ({:?}): {}",
+                            omitted.command, omitted.category, omitted.reason
+                        );
+                    }
+                    println!();
+                }
                 println!("Sequences:");
 
                 let cross_section = std::f64::consts::PI * (1.75f64 / 2.0).powf(2.0);
@@ -287,9 +318,19 @@ impl EstimateCmd {
                         );
                     }
                     println!(
-                        "  Minimal time:                {} ({:.3}s)",
-                        format_time(seq.total_time),
-                        seq.total_time
+                        "  Motion time:                 {} ({:.3}s)",
+                        format_time(seq.duration.motion_time),
+                        seq.duration.motion_time
+                    );
+                    println!(
+                        "  Deterministic time:          {} ({:.3}s)",
+                        format_time(seq.duration.deterministic_time),
+                        seq.duration.deterministic_time
+                    );
+                    println!(
+                        "  Expected total time:         {} ({:.3}s)",
+                        format_time(seq.duration.expected_total_time),
+                        seq.duration.expected_total_time
                     );
                     println!(
                         "  Total print move time:       {} ({:.3}s)",
@@ -308,7 +349,7 @@ impl EstimateCmd {
                     );
                     println!(
                         "  Average speed:               {:.3} mm/s",
-                        seq.total_distance / seq.total_time
+                        seq.total_distance / seq.duration.total_time
                     );
                     println!(
                         "  Top speed:                   {}",
@@ -320,7 +361,7 @@ impl EstimateCmd {
                     );
                     println!(
                         "  Average flow:                {:.3} mm³/s",
-                        seq.total_extrude_distance * cross_section / seq.total_time
+                        seq.total_extrude_distance * cross_section / seq.duration.total_time
                     );
                     println!(
                         "  Maximum flow:                {}",

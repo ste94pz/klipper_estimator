@@ -25,7 +25,8 @@ pub struct Planner {
 }
 
 impl Planner {
-    pub fn from_limits(limits: PrinterLimits) -> Planner {
+    pub fn from_limits(mut limits: PrinterLimits) -> Planner {
+        limits.recalculate();
         let motion_transforms = MotionTransformState::new(limits.motion_transforms.clone());
         let firmware_retraction = limits
             .firmware_retraction
@@ -51,6 +52,35 @@ impl Planner {
     /// open move sequence.
     /// Returns the number of planning operations the command resulted in
     pub fn process_cmd(&mut self, cmd: &GCodeCommand) -> usize {
+        if let Some(command) = Self::command_name(cmd) {
+            if let Some(contract) = self
+                .toolhead_state
+                .limits
+                .command_contracts
+                .get(&command)
+                .cloned()
+            {
+                if !contract.duration.is_finite() || contract.duration < 0.0 {
+                    self.operations
+                        .add_diagnostic(PlannerDiagnostic::invalid_duration_contract(&command));
+                    self.operations.add_delay(Delay::Unknown {
+                        command: command.to_ascii_uppercase(),
+                        category: contract.category.unknown_category(),
+                    });
+                    return 1;
+                }
+                if let Err(name) = self.toolhead_state.apply_contract_state(&contract.state) {
+                    self.operations
+                        .add_diagnostic(PlannerDiagnostic::unknown_extruder(&name));
+                }
+                self.operations.add_delay(Delay::Contract {
+                    duration: Duration::from_secs_f64(contract.duration),
+                    command: command.to_ascii_uppercase(),
+                    category: contract.category,
+                });
+                return 1;
+            }
+        }
         if Self::is_unsupported_traditional_state_command(cmd) {
             self.operations.add_diagnostic(PlannerDiagnostic {
                 code: PlannerDiagnosticCode::UnsupportedStateCommand,
@@ -66,6 +96,10 @@ impl Planner {
             });
         }
         if let Some(m) = Self::is_dwell(cmd, &mut self.kind_tracker) {
+            if let Delay::Unknown { command, category } = &m {
+                self.operations
+                    .add_diagnostic(PlannerDiagnostic::unknown_duration(command, *category));
+            }
             self.operations.add_delay(m);
         } else if let GCodeOperation::Move { x, y, z, e, f } = &cmd.op {
             if let Some(v) = f {
@@ -329,6 +363,15 @@ impl Planner {
                 self.operations
                     .add_diagnostic(PlannerDiagnostic::unsupported_state_command(command));
             }
+            if !Self::is_known_extended_command(command) {
+                let command = command.to_ascii_uppercase();
+                let category = Self::unknown_extended_category(&command);
+                self.operations
+                    .add_diagnostic(PlannerDiagnostic::unknown_duration(&command, category));
+                self.operations
+                    .add_delay(Delay::Unknown { command, category });
+                return 1;
+            }
             self.operations.add_fill();
         } else if let (true, Some(comment)) = (cmd.op.is_nop(), cmd.comment.as_ref()) {
             if let Some(comment) = comment.strip_prefix("TYPE:") {
@@ -339,10 +382,10 @@ impl Planner {
             } else if let Some(cmd) = comment.trim_start().strip_prefix("ESTIMATOR_ADD_TIME ") {
                 if let Some((duration, kind)) = Self::parse_buffer_cmd(&mut self.kind_tracker, cmd)
                 {
-                    self.operations.add_delay(Delay::Indeterminate(
-                        Duration::from_secs_f64(duration),
+                    self.operations.add_delay(Delay::EstimatorAddition {
+                        duration: Duration::from_secs_f64(duration),
                         kind,
-                    ));
+                    });
                 } else {
                     self.operations.add_fill();
                 }
@@ -381,6 +424,43 @@ impl Planner {
         )
     }
 
+    fn is_known_extended_command(command: &str) -> bool {
+        matches!(
+            command,
+            "set_velocity_limit"
+                | "set_retraction"
+                | "activate_extruder"
+                | "set_gcode_offset"
+                | "save_gcode_state"
+                | "restore_gcode_state"
+                | "bed_mesh_clear"
+                | "bed_mesh_profile"
+                | "bed_mesh_offset"
+                | "set_skew"
+                | "skew_profile"
+                | "temperature_wait"
+                | "set_heater_temperature"
+                | "set_fan_speed"
+                | "turn_off_heaters"
+                | "set_pin"
+                | "set_pressure_advance"
+                | "set_input_shaper"
+                | "respond"
+                | "display_message"
+        ) || Self::is_unsupported_state_command(command)
+    }
+
+    fn unknown_extended_category(command: &str) -> UnknownDurationCategory {
+        match command {
+            "PROBE"
+            | "BED_MESH_CALIBRATE"
+            | "QUAD_GANTRY_LEVEL"
+            | "Z_TILT_ADJUST"
+            | "SCREWS_TILT_CALCULATE" => UnknownDurationCategory::Probing,
+            _ => UnknownDurationCategory::CommandOrMacro,
+        }
+    }
+
     fn is_unsupported_traditional_state_command(cmd: &GCodeCommand) -> bool {
         matches!(
             cmd.op,
@@ -396,45 +476,61 @@ impl Planner {
         )
     }
 
-    fn is_dwell(cmd: &GCodeCommand, kind_tracker: &mut KindTracker) -> Option<Delay> {
-        let indef = Duration::from_secs_f64(0.1);
+    fn is_dwell(cmd: &GCodeCommand, _kind_tracker: &mut KindTracker) -> Option<Delay> {
         match &cmd.op {
             GCodeOperation::Traditional {
                 letter: 'G',
                 code: 4,
                 params,
-            } => Some(Delay::Pause(Duration::from_secs_f64(
-                params
-                    .get_number('P')
-                    .map_or(0.0, |v: f64| (v / 1000.0).max(0.0)),
+            } => Some(Delay::Dwell(Duration::from_secs_f64(
+                params.get_number('P').map_or(0.0, |v: f64| {
+                    if v.is_finite() {
+                        (v / 1000.0).max(0.0)
+                    } else {
+                        0.0
+                    }
+                }),
             ))),
             GCodeOperation::Traditional {
                 letter: 'G',
                 code: 28,
                 ..
-            } => Some(Delay::Indeterminate(
-                indef,
-                Some(kind_tracker.get_kind("Indeterminate time")),
-            )),
+            } => Some(Delay::Unknown {
+                command: "G28".into(),
+                category: UnknownDurationCategory::Homing,
+            }),
             GCodeOperation::Traditional {
                 letter: 'M',
-                code: 109 | 190,
+                code: code @ (109 | 190),
                 ..
-            } => Some(Delay::Indeterminate(
-                indef,
-                Some(kind_tracker.get_kind("Indeterminate time")),
-            )),
-            GCodeOperation::Extended { command: cmd, .. } if cmd == "temperature_wait" => Some(
-                Delay::Indeterminate(indef, Some(kind_tracker.get_kind("Indeterminate time"))),
-            ),
+            } => Some(Delay::Unknown {
+                command: format!("M{code}"),
+                category: UnknownDurationCategory::TemperatureWait,
+            }),
+            GCodeOperation::Extended { command: cmd, .. } if cmd == "temperature_wait" => {
+                Some(Delay::Unknown {
+                    command: cmd.to_ascii_uppercase(),
+                    category: UnknownDurationCategory::TemperatureWait,
+                })
+            }
             GCodeOperation::Traditional {
                 letter: 'M',
                 code: 600,
                 ..
-            } => Some(Delay::Indeterminate(
-                indef,
-                Some(kind_tracker.get_kind("Indeterminate time")),
-            )),
+            } => Some(Delay::Unknown {
+                command: "M600".into(),
+                category: UnknownDurationCategory::UserInteraction,
+            }),
+            _ => None,
+        }
+    }
+
+    fn command_name(cmd: &GCodeCommand) -> Option<String> {
+        match &cmd.op {
+            GCodeOperation::Traditional { letter, code, .. } => {
+                Some(format!("{letter}{code}").to_ascii_lowercase())
+            }
+            GCodeOperation::Extended { command, .. } => Some(command.to_ascii_lowercase()),
             _ => None,
         }
     }
@@ -443,7 +539,10 @@ impl Planner {
         let (a, b) = cmd
             .split_once(' ')
             .map_or((cmd, None), |(l, r)| (l, Some(r)));
-        let duration = a.parse().ok()?;
+        let duration: f64 = a.parse().ok()?;
+        if !duration.is_finite() || duration < 0.0 {
+            return None;
+        }
         let kind = b.map(|s| kind_tracker.get_kind(s));
         Some((duration, kind))
     }
@@ -487,17 +586,93 @@ fn parse_skew_factor(value: &str) -> Option<f64> {
     (lengths.next().is_none() && factor.is_finite()).then_some(factor)
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurationContractCategory {
+    #[default]
+    Macro,
+    Homing,
+    Probing,
+    Other,
+}
+
+impl DurationContractCategory {
+    fn unknown_category(self) -> UnknownDurationCategory {
+        match self {
+            Self::Homing => UnknownDurationCategory::Homing,
+            Self::Probing => UnknownDurationCategory::Probing,
+            Self::Macro | Self::Other => UnknownDurationCategory::CommandOrMacro,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContractState {
+    pub coordinate_mode: Option<PositionMode>,
+    pub extrusion_mode: Option<PositionMode>,
+    pub gcode_position: Option<[f64; 4]>,
+    pub physical_position: Option<[f64; 4]>,
+    pub speed_factor_percent: Option<f64>,
+    pub extrusion_factor_percent: Option<f64>,
+    pub active_extruder: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandContract {
+    pub duration: f64,
+    pub category: DurationContractCategory,
+    pub state: ContractState,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownDurationCategory {
+    Homing,
+    Probing,
+    TemperatureWait,
+    UserInteraction,
+    CommandOrMacro,
+}
+
+impl UnknownDurationCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Homing => "homing",
+            Self::Probing => "probing",
+            Self::TemperatureWait => "temperature wait",
+            Self::UserInteraction => "user interaction",
+            Self::CommandOrMacro => "command or macro",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Delay {
-    Indeterminate(Duration, Option<Kind>),
-    Pause(Duration),
+    Dwell(Duration),
+    EstimatorAddition {
+        duration: Duration,
+        kind: Option<Kind>,
+    },
+    Contract {
+        duration: Duration,
+        command: String,
+        category: DurationContractCategory,
+    },
+    Unknown {
+        command: String,
+        category: UnknownDurationCategory,
+    },
 }
 
 impl Delay {
-    pub fn duration(&self) -> Duration {
+    pub fn duration(&self) -> Option<Duration> {
         match self {
-            Delay::Indeterminate(d, _) => *d,
-            Delay::Pause(d) => *d,
+            Delay::Dwell(d)
+            | Delay::EstimatorAddition { duration: d, .. }
+            | Delay::Contract { duration: d, .. } => Some(*d),
+            Delay::Unknown { .. } => None,
         }
     }
 }
@@ -522,6 +697,8 @@ pub enum PlannerDiagnosticCode {
     ExtrudeOnlyMoveTooLong,
     MoveExceedsMaximumExtrusion,
     ExtrudeWithoutExtruder,
+    UnknownDuration,
+    InvalidDurationContract,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -554,6 +731,26 @@ impl PlannerDiagnostic {
             code: PlannerDiagnosticCode::UnknownExtruder,
             command: "ACTIVATE_EXTRUDER".into(),
             message: format!("Klipper has no configured extruder named '{name}'"),
+        }
+    }
+
+    fn unknown_duration(command: &str, category: UnknownDurationCategory) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::UnknownDuration,
+            command: command.to_ascii_uppercase(),
+            message: format!(
+                "{} duration is unknown; no time was invented and expected_total_time is a lower bound",
+                category.label()
+            ),
+        }
+    }
+
+    fn invalid_duration_contract(command: &str) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::InvalidDurationContract,
+            command: command.to_ascii_uppercase(),
+            message: "command contract duration must be a finite non-negative number; duration was omitted"
+                .into(),
         }
     }
 
@@ -1295,6 +1492,11 @@ pub struct PrinterLimits {
     pub motion_transforms: MotionTransformConfig,
     pub initial_coordinate_mode: PositionMode,
     pub initial_extrusion_mode: PositionMode,
+    /// Explicit fixed-duration contracts for unexpanded G-code macros or
+    /// deterministic commands such as fully configured homing/probing models.
+    /// Keys are matched case-insensitively.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub command_contracts: BTreeMap<String, CommandContract>,
 }
 
 impl Default for PrinterLimits {
@@ -1319,6 +1521,7 @@ impl Default for PrinterLimits {
             // Compatibility default: slicer start macros commonly contain the M83 that the
             // estimator cannot see. Klipper itself starts in absolute extrusion mode.
             initial_extrusion_mode: PositionMode::Relative,
+            command_contracts: BTreeMap::new(),
         }
     }
 }
@@ -1327,6 +1530,10 @@ impl PrinterLimits {
     pub fn recalculate(&mut self) {
         self.update_junction_deviation();
         self.update_accel_to_decel();
+        self.command_contracts = std::mem::take(&mut self.command_contracts)
+            .into_iter()
+            .map(|(name, contract)| (name.to_ascii_lowercase(), contract))
+            .collect();
     }
 
     pub fn set_max_velocity(&mut self, v: f64) {
@@ -1485,6 +1692,39 @@ impl ToolheadState {
 
     pub fn active_extruder(&self) -> Option<&str> {
         self.active_extruder.as_deref()
+    }
+
+    fn apply_contract_state(&mut self, state: &ContractState) -> Result<(), String> {
+        if let Some(extruder) = state.active_extruder.as_deref() {
+            if !self.limits.extruders.contains_key(extruder) {
+                return Err(extruder.to_string());
+            }
+        }
+        if let Some(mode) = state.coordinate_mode {
+            self.position_modes[..3].fill(mode);
+        }
+        if let Some(mode) = state.extrusion_mode {
+            self.position_modes[3] = mode;
+        }
+        if let Some(position) = state.physical_position {
+            self.position = Vec4::from_slice(&position);
+            self.planner_position = self.motion_transforms.transform_position(self.position);
+            self.planner_has_moved = false;
+        }
+        if let Some(position) = state.gcode_position {
+            self.set_gcode_position(position.map(Some));
+        }
+        if let Some(percent) = state.speed_factor_percent {
+            self.set_speed_factor(percent);
+        }
+        if let Some(percent) = state.extrusion_factor_percent {
+            self.set_extrude_factor(percent);
+        }
+        if let Some(extruder) = state.active_extruder.as_deref() {
+            self.activate_extruder(extruder)
+                .expect("contract extruder was validated");
+        }
+        Ok(())
     }
 
     fn active_extruder_index(&self) -> u8 {

@@ -81,16 +81,31 @@ because they do not change the toolhead move timing in the pinned reference.
 
 ## What is not generally predictable from the file
 
-Klipper macros may inspect live printer state and execute different commands on each run. Heating, homing, probing, filament changes, user pauses, recovery, and network or host delays may also add wall-clock time that is not represented by normal movement commands.
+Klipper macros may inspect live printer state and execute different commands on
+each run. Heating, homing, probing, filament changes, user pauses, recovery,
+and network or host delays may also add wall-clock time that is not represented
+by normal movement commands.
 
-The reported minimal time should therefore not be interpreted as a guaranteed completion time. Use `ESTIMATOR_ADD_TIME` for known fixed overhead as described in the main README.
+The estimate separates planned `motion_time`, known `deterministic_time`, and
+`expected_total_time`. Explicit `ESTIMATOR_ADD_TIME` observations affect only
+the expected total. Included values are broken down in `duration_components`;
+unknown waits and macro effects appear in `omitted_duration_components` and as
+structured diagnostics. No nominal `0.1` second placeholder is assigned to an
+unknown wait.
+
+Command contracts can supply a fixed duration and resulting coordinate,
+extrusion, position, override, and active-extruder state without evaluating
+Jinja. A homing or probing contract is deterministic only when the configured
+duration and complete resulting state apply to every invocation. Without such
+a contract, the output stays usable but explicitly remains a lower bound.
 
 ## Getting repeatable results
 
 1. Generate the estimate with the configuration of the target printer.
 2. Keep extrusion mode explicit in slicer start G-code when possible.
 3. Keep dynamic velocity-limit commands in the exported file rather than only in an external macro.
-4. Add measured constant macro overhead with `ESTIMATOR_ADD_TIME`.
+4. Add measured overhead with `ESTIMATOR_ADD_TIME`, or use a command contract
+   when both fixed duration and resulting state are known.
 5. Compare estimates with completed, unpaused prints and investigate errors that scale with move count or geometry separately from constant startup overhead.
 
 The configuration fields `initial_coordinate_mode` and

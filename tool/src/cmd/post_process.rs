@@ -10,9 +10,10 @@ use regex::Regex;
 use lib_klipper::gcode::{
     parse_gcode, GCodeCommand, GCodeOperation, GCodeReader, GCodeTraditionalParams,
 };
-use lib_klipper::planner::{Planner, PlanningOperation};
+use lib_klipper::planner::Planner;
 use lib_klipper::slicer::SlicerPreset;
 
+use crate::duration::DurationEstimate;
 use crate::Opts;
 
 #[derive(Parser, Debug)]
@@ -313,6 +314,7 @@ fn metadata_processor(preset: &SlicerPreset) -> Box<dyn GCodeInterceptor> {
 #[derive(Debug)]
 struct PostProcessEstimationResult {
     total_time: f64,
+    duration: DurationEstimate,
     slicer: Option<SlicerPreset>,
 }
 
@@ -320,6 +322,7 @@ impl std::default::Default for PostProcessEstimationResult {
     fn default() -> Self {
         PostProcessEstimationResult {
             total_time: 0.0,
+            duration: DurationEstimate::default(),
             slicer: None,
         }
     }
@@ -377,18 +380,19 @@ impl EstimateRunner {
         for diagnostic in self.planner.diagnostics() {
             eprintln!("{}: {}", diagnostic.command, diagnostic.message);
         }
+        for omitted in &self.state.result.duration.omitted_duration_components {
+            eprintln!(
+                "{}: omitted {:?} duration ({})",
+                omitted.command, omitted.category, omitted.reason
+            );
+        }
     }
 
     fn flush(&mut self) {
-        for c in self.planner.iter() {
+        for c in self.planner.iter().collect::<Vec<_>>() {
             let (n, cmd) = self.buffer.front_mut().unwrap();
-            match c {
-                PlanningOperation::Delay(d) => {
-                    self.state.result.total_time += d.duration().as_secs_f64()
-                }
-                PlanningOperation::Move(m) => self.state.result.total_time += m.total_time(),
-                PlanningOperation::Fill => {}
-            }
+            self.state.result.duration.add_operation(&self.planner, &c);
+            self.state.result.total_time = self.state.result.duration.expected_total_time;
             self.state
                 .gcode_interceptor
                 .post_command(cmd, &mut self.state.result);
@@ -462,5 +466,54 @@ impl PostProcessCmd {
     pub fn run(&self, opts: &Opts) {
         let state = self.estimate(opts);
         self.apply_changes(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lib_klipper::planner::PrinterLimits;
+    use std::io::Cursor;
+
+    #[test]
+    fn post_process_legacy_total_tracks_expected_total() {
+        let input = b"G1 X10 F600\n; ESTIMATOR_ADD_TIME 2 measured\n";
+        let mut reader = GCodeReader::new(BufReader::new(Cursor::new(input)));
+        let mut runner = EstimateRunner {
+            state: PostProcessState::default(),
+            planner: Planner::from_limits(PrinterLimits::default()),
+            buffer: VecDeque::new(),
+        };
+
+        runner.run(&mut reader);
+
+        assert_eq!(
+            runner.state.result.total_time,
+            runner.state.result.duration.expected_total_time
+        );
+        assert_eq!(
+            runner.state.result.duration.expected_total_time,
+            runner.state.result.duration.deterministic_time + 2.0
+        );
+    }
+
+    #[test]
+    fn legacy_cura_fields_use_expected_total_time() {
+        let mut interceptor = CuraGCodeInterceptor::default();
+        let mut duration = DurationEstimate::default();
+        duration.motion_time = 30.0;
+        duration.deterministic_time = 35.0;
+        duration.expected_total_time = 42.4;
+        duration.total_time = 42.4;
+        let result = PostProcessEstimationResult {
+            total_time: 42.4,
+            duration,
+            slicer: Some(SlicerPreset::Cura { version: None }),
+        };
+
+        let output = interceptor
+            .output_process(&parse_gcode(";TIME:999").unwrap(), &result)
+            .expect("Cura TIME field should be replaced");
+        assert_eq!(output.comment.as_deref(), Some("TIME:43"));
     }
 }

@@ -291,7 +291,7 @@ fn dwell_uses_klippers_zero_default_and_millisecond_duration() {
     let durations: Vec<_> = planner
         .iter()
         .filter_map(|operation| match operation {
-            PlanningOperation::Delay(delay) => Some(delay.duration().as_secs_f64()),
+            PlanningOperation::Delay(delay) => delay.duration().map(|value| value.as_secs_f64()),
             _ => None,
         })
         .collect();

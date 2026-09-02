@@ -9,6 +9,7 @@ extern crate lazy_static;
 
 mod cmd;
 mod config_snapshot;
+mod duration;
 
 use config_snapshot::{
     apply_kinematics_classification, fetch_moonraker_snapshot, load_offline_snapshot,

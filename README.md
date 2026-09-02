@@ -266,7 +266,9 @@ Sequences:
   Total moves: 42876
   Total distance: 73313.01640025008
   Total extrude distance: 3407.877500000097
-  Minimal time: 1h29m9.948s (5349.947936969622)
+  Motion time: 1h29m9.698s (5349.697936969622)
+  Deterministic time: 1h29m9.948s (5349.947936969622)
+  Expected total time: 1h29m9.948s (5349.947936969622)
   Average flow: 1.5321468696371368 mm3/s
   Phases:
     Acceleration: 27m4.291s
@@ -285,11 +287,20 @@ Sequences:
    38m13.706s           => WALL-OUTER
 ```
 
-The calculations are done based only on the commands found in the file, with no
-regards for macro expansions. This means that `print_start` type macros will
-count as zero seconds, as well heat up times, homing, etc. Therefore the time
-output should be considered a "minimal time", assuming these extra factors take
-no time.
+Both the top-level JSON object and each sequence expose `motion_time`,
+`deterministic_time`, and `expected_total_time`. `motion_time` is planned
+movement only. `deterministic_time` also includes known fixed components such
+as dwell, the legacy lookahead flush allowance, and configured command
+contracts. `expected_total_time` additionally includes explicit
+`ESTIMATOR_ADD_TIME` adjustments. The legacy JSON `total_time` field remains an
+alias of `expected_total_time`.
+
+`duration_components` identifies every included category.
+`omitted_duration_components` lists waits, interactions, or unexpanded macros
+whose duration is unknown; their duration is not replaced by a plausible
+constant. Consequently, `expected_total_time` is still a lower bound whenever
+that array is non-empty. Human output and structured planner diagnostics expose
+the same condition.
 
 See [Estimate scope and accuracy](doc/accuracy.md) for practical guidance on
 configuration, repeatability, and interpreting the result.
@@ -363,9 +374,10 @@ comment(generally syntax followed by some examples):
 ; ESTIMATOR_ADD_TIME 21 Print start
 ```
 
-When `klipper_estimator` encounters a comment with this format, it will add the
-requested duration to the total print time. The time will also be tracked as a
-"move kind", if the description field is given.
+When `klipper_estimator` encounters a comment with this format, it adds the
+requested duration to `expected_total_time`, but not to `motion_time` or
+`deterministic_time`. It is recorded under an `estimator_addition` category,
+including the optional description.
 
 Note that only the upper-case string `ESTIMATOR_ADD_TIME`, on a separate comment
 line, will trigger this behaviour. Any whitespace between the `;` and `E`
@@ -379,6 +391,40 @@ print start gcode like this:
 ; ESTIMATOR_ADD_TIME 20 Prime line
 print_start extruder=[first_layer_temperature] bed=[first_layer_bed_temperature]
 ```
+
+For a fixed macro contract, configure both its duration and the G-code state it
+leaves behind. Contract names are case-insensitive and parameters are not
+evaluated:
+
+```json5
+{
+  command_contracts: {
+    PRINT_START: {
+      duration: 20.0,
+      category: "macro",
+      state: {
+        coordinate_mode: "absolute",
+        extrusion_mode: "relative",
+        physical_position: [5.0, 5.0, 0.3, 0.0],
+        gcode_position: [5.0, 5.0, 0.3, 0.0],
+        speed_factor_percent: 100.0,
+        extrusion_factor_percent: 100.0,
+      },
+    },
+  },
+}
+```
+
+The state fields are optional; `active_extruder` is also supported. The
+estimator applies this declaration without evaluating the macro's Jinja. The
+contract duration is deterministic and is categorized as `macro_contract`.
+Use `category: "homing"` or `"probing"` for an explicit deterministic model of
+such a command, but only when duration and complete resulting state are known
+for every invocation. Otherwise omit the contract: the command is reported in
+`omitted_duration_components` instead of receiving an invented duration.
+
+Existing slicer metadata fields and progress commands are populated from
+`expected_total_time`, preserving the post-processing interface.
 
 ## Development checks
 
