@@ -1,25 +1,21 @@
-use anyhow::Result;
+const FORK_SUFFIX: &str = "-ste94pz";
 
-fn describe_git() -> Result<String> {
-    let dir = std::env::current_dir()?;
-    let repo = git2::Repository::discover(dir)?;
-    let mut desc_opts = git2::DescribeOptions::new();
-    desc_opts.describe_tags();
-    let desc = repo.describe(&desc_opts)?;
-    let mut fmt_opts = git2::DescribeFormatOptions::new();
-    fmt_opts.dirty_suffix("-dirty");
-    Ok(desc.format(Some(&fmt_opts))?)
+fn fork_version(version: &str) -> String {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let suffix = if version.ends_with(FORK_SUFFIX) {
+        ""
+    } else {
+        FORK_SUFFIX
+    };
+    format!("v{version}{suffix}")
 }
 
-fn main() -> Result<()> {
+fn main() {
     println!("cargo:rerun-if-env-changed=TOOL_VERSION");
 
-    let version = std::env::var("TOOL_VERSION")
-        .or_else(|_| describe_git())
-        .or_else(|_| std::env::var("CARGO_PKG_VERSION"))
-        .unwrap_or_else(|_| "unknown".into());
+    let version =
+        std::env::var("TOOL_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into());
+    let version = fork_version(&version);
 
     println!("cargo:rustc-env=TOOL_VERSION={version}");
-
-    Ok(())
 }

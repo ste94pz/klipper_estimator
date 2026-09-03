@@ -19,7 +19,10 @@ use config_snapshot::{
 };
 
 #[derive(Parser, Debug)]
-#[clap(version = env!("TOOL_VERSION"), author = "Lasse Dalegaard <dalegaard@gmail.com>")]
+#[clap(
+    version = env!("TOOL_VERSION"),
+    author = "Lasse Dalegaard <dalegaard@gmail.com>, ste94pz"
+)]
 pub struct Opts {
     #[clap(long = "config_moonraker_url")]
     config_moonraker: Option<String>,

@@ -4,7 +4,8 @@ This repository is a maintained fork of the now-archived
 [Annex Engineering project](https://github.com/Annex-Engineering/klipper_estimator).
 The original estimator was created by Lasse Dalegaard and improved by many
 contributors. Their work made this continuation possible, and is gratefully
-acknowledged.
+acknowledged. This fork is maintained by
+[ste94pz](https://github.com/ste94pz).
 
 `klipper_estimator` is a tool for determining the time a print will take using
 the Klipper firmware. Currently it provides the following modes:
@@ -24,6 +25,13 @@ this is considered a bug.
 Pre-built binaries are available for the latest release on the GitHub Releases
 page. If you wish to build the tool yourself or poke around the source, see the
 [Building section](#building).
+
+The archived upstream `v3.7.3` release is the historical versioning baseline.
+This maintained fork continues from it with its own Semantic Versioning series.
+Cargo manifests contain the stable product version, while release tags and
+public output append the fork identifier: release `3.8.0` is therefore tagged
+and reported as `v3.8.0-ste94pz`. The same public version appears in the CLI,
+estimate metadata, calibration markers, and processed G-code.
 
 Binaries are provided for Windows, Linux, Mac OS X, and Raspberry Pi targets.
 On Linux and Mac OS X, ensure that you give the downloaded file executable
@@ -589,5 +597,7 @@ Windows).
 This project is in no way endorsed by the Klipper project. Please do not direct
 any support requests to the Klipper project.
 
+* Original `klipper_estimator` by [Lasse Dalegaard](https://github.com/Annex-Engineering/klipper_estimator)
+* Fork maintenance and continued development by [ste94pz](https://github.com/ste94pz)
 * [Klipper](https://www.klipper3d.org/) by [Kevin O'Connor](https://www.patreon.com/koconnor)
 * [Moonraker](https://github.com/Arksine/moonraker) by Arksine

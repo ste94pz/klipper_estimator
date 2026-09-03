@@ -1,4 +1,5 @@
 # Copyright (c) 2022 Lasse Dalegaard
+# Copyright (c) 2026 ste94pz
 # MIT licensed
 
 from ..Script import Script

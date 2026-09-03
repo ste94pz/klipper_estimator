@@ -37,6 +37,16 @@ fn assert_clean_error(output: &Output, expected: &str) {
 }
 
 #[test]
+fn version_identifies_the_upstream_baseline_and_fork() {
+    let output = binary().arg("--version").output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "klipper_estimator v3.8.0-ste94pz\n"
+    );
+}
+
+#[test]
 fn missing_gcode_files_are_reported_without_panicking() {
     let path = missing_path();
     let path = path.to_str().unwrap();
