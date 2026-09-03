@@ -3,9 +3,7 @@ use lib_klipper::planner::{Planner, PrinterLimits};
 
 use clap::Parser;
 use config::{Value, ValueKind};
-use once_cell::sync::OnceCell;
-#[macro_use]
-extern crate lazy_static;
+use std::sync::OnceLock;
 
 mod calibration;
 mod cmd;
@@ -63,7 +61,7 @@ pub struct Opts {
     cmd: SubCommand,
 
     #[clap(skip)]
-    config: OnceCell<ConfigSnapshot>,
+    config: OnceLock<ConfigSnapshot>,
 }
 
 impl Opts {

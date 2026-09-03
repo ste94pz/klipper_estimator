@@ -1,5 +1,3 @@
-use regex::Regex;
-
 #[derive(Debug, Clone)]
 pub enum SlicerPreset {
     PrusaSlicer { version: String },
@@ -28,69 +26,115 @@ impl std::fmt::Display for SlicerPreset {
 
 impl SlicerPreset {
     pub fn determine(comment: &str) -> Option<SlicerPreset> {
-        None.or_else(|| Self::try_slic3r(comment))
+        Self::try_slic3r(comment)
             .or_else(|| Self::try_ideamaker(comment))
             .or_else(|| Self::try_cura_old(comment))
             .or_else(|| Self::try_cura_new(comment))
             .or_else(|| Self::try_simplify3d(comment))
     }
 
-    #[allow(clippy::manual_map)]
     fn try_slic3r(comment: &str) -> Option<SlicerPreset> {
-        lazy_static! {
-            static ref RE_PRUSA: Regex = Regex::new(r"PrusaSlicer\s(.*)\son").unwrap();
-            static ref RE_SUPER: Regex = Regex::new(r"SuperSlicer\s(.*)\son").unwrap();
-            static ref RE_ORCA: Regex = Regex::new(r"OrcaSlicer\s(.*)\son").unwrap();
-        }
-        if let Some(m) = RE_PRUSA.captures(comment) {
-            Some(SlicerPreset::PrusaSlicer {
-                version: m.get(1).unwrap().as_str().into(),
+        extract_version_before(comment, "PrusaSlicer", "on")
+            .map(|version| SlicerPreset::PrusaSlicer { version })
+            .or_else(|| {
+                extract_version_before(comment, "SuperSlicer", "on")
+                    .map(|version| SlicerPreset::SuperSlicer { version })
             })
-        } else if let Some(m) = RE_SUPER.captures(comment) {
-            Some(SlicerPreset::SuperSlicer {
-                version: m.get(1).unwrap().as_str().into(),
+            .or_else(|| {
+                extract_version_before(comment, "OrcaSlicer", "on")
+                    .map(|version| SlicerPreset::OrcaSlicer { version })
             })
-        } else if let Some(m) = RE_ORCA.captures(comment) {
-            Some(SlicerPreset::OrcaSlicer {
-                version: m.get(1).unwrap().as_str().into(),
-            })
-        } else {
-            None
-        }
     }
 
     fn try_ideamaker(comment: &str) -> Option<SlicerPreset> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r"Sliced by ideaMaker\s(.*),").unwrap();
-        }
-        RE.captures(comment).map(|c| SlicerPreset::IdeaMaker {
-            version: c.get(1).unwrap().as_str().into(),
+        extract_after_whitespace(comment, "Sliced by ideaMaker").and_then(|value| {
+            value.rfind(',').map(|end| SlicerPreset::IdeaMaker {
+                version: value[..end].into(),
+            })
         })
     }
 
     fn try_cura_old(comment: &str) -> Option<SlicerPreset> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r"Generated with Cura_SteamEngine\s(.*)").unwrap();
-        }
-        RE.captures(comment).map(|c| SlicerPreset::Cura {
-            version: Some(c.get(1).unwrap().as_str().into()),
+        extract_after_whitespace(comment, "Generated with Cura_SteamEngine").map(|version| {
+            SlicerPreset::Cura {
+                version: Some(version.into()),
+            }
         })
     }
 
     fn try_cura_new(comment: &str) -> Option<SlicerPreset> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r"GENERATOR.NAME:Cura_SteamEngine").unwrap();
-        }
-        RE.captures(comment)
-            .map(|_| SlicerPreset::Cura { version: None })
+        comment
+            .contains("GENERATOR.NAME:Cura_SteamEngine")
+            .then_some(SlicerPreset::Cura { version: None })
     }
 
     fn try_simplify3d(comment: &str) -> Option<SlicerPreset> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r"Simplify3D\(R\)\sVersion\s(.*)").unwrap();
-        }
-        RE.captures(comment).map(|c| SlicerPreset::Simplify3D {
-            version: c.get(1).unwrap().as_str().into(),
+        extract_after_whitespace(comment, "Simplify3D(R)")
+            .and_then(|value| value.strip_prefix("Version"))
+            .and_then(strip_leading_whitespace)
+            .map(|version| SlicerPreset::Simplify3D {
+                version: version.into(),
+            })
+    }
+}
+
+fn extract_after_whitespace<'a>(input: &'a str, marker: &str) -> Option<&'a str> {
+    let start = input.find(marker)? + marker.len();
+    strip_leading_whitespace(&input[start..])
+}
+
+fn strip_leading_whitespace(input: &str) -> Option<&str> {
+    let first = input.chars().next()?;
+    first.is_whitespace().then(|| &input[first.len_utf8()..])
+}
+
+fn extract_version_before(input: &str, marker: &str, suffix: &str) -> Option<String> {
+    let value = extract_after_whitespace(input, marker)?;
+    value
+        .char_indices()
+        .rev()
+        .find(|(index, character)| {
+            character.is_whitespace() && value[index + character.len_utf8()..].starts_with(suffix)
         })
+        .map(|(end, _)| value[..end].into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SlicerPreset;
+
+    #[test]
+    fn recognizes_supported_slicer_markers_without_regular_expressions() {
+        let cases = [
+            (
+                "generated by PrusaSlicer 2.8.1 on 2026-09-03",
+                "PrusaSlicer 2.8.1",
+            ),
+            ("SuperSlicer 2.5.60 on 2026-09-03", "SuperSlicer 2.5.60"),
+            ("OrcaSlicer 2.3.1 on 2026-09-03", "OrcaSlicer 2.3.1"),
+            ("Sliced by ideaMaker 5.2.3, 2026-09-03", "ideaMaker 5.2.3"),
+            ("Generated with Cura_SteamEngine 5.10.0", "Cura 5.10.0"),
+            ("GENERATOR.NAME:Cura_SteamEngine", "Cura"),
+            ("Simplify3D(R) Version 5.1.2", "Simplify3D 5.1.2"),
+        ];
+
+        for (comment, expected) in cases {
+            assert_eq!(
+                SlicerPreset::determine(comment).unwrap().to_string(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_similar_but_incomplete_markers() {
+        for comment in [
+            "PrusaSlicer 2.8.1",
+            "Sliced by ideaMaker5.2.3,",
+            "Generated with Cura_SteamEngine",
+            "Simplify3D(R) Version5.1.2",
+        ] {
+            assert!(SlicerPreset::determine(comment).is_none(), "{comment}");
+        }
     }
 }

@@ -9,10 +9,10 @@ acknowledged.
 `klipper_estimator` is a tool for determining the time a print will take using
 the Klipper firmware. Currently it provides the following modes:
 
-  * `estimate` mode outputs detailed statistics about a print job
-  * `post-process` mode can be used as a Slicer post-processing script, updating
+* `estimate` mode outputs detailed statistics about a print job
+* `post-process` mode can be used as a Slicer post-processing script, updating
     the gcode output file with corrected time estimates.
-  * `dump-moves` mode dumps planning data for every move in a file
+* `dump-moves` mode dumps planning data for every move in a file
 
 The estimator mirrors Klipper's motion planner and the supported kinematics
 described below. Small numeric differences may remain due to rounding modes. If
@@ -23,14 +23,16 @@ this is considered a bug.
 
 Pre-built binaries are available for the latest release on the GitHub Releases
 page. If you wish to build the tool yourself or poke around the source, see the
-[Building section](#Building).
+[Building section](#building).
 
 Binaries are provided for Windows, Linux, Mac OS X, and Raspberry Pi targets.
 On Linux and Mac OS X, ensure that you give the downloaded file executable
 permissions. This can be done in the terminal as follows:
+
+```sh
+chmod +x klipper_estimator
 ```
-$ chmod +x klipper_estimator
-```
+
 Change the filename (last parameter) to match the downloaded file.
 
 For Arch Linux, an AUR package
@@ -66,7 +68,7 @@ loaded from the Moonraker cache because those overrides would be stale.
 For an offline printer configuration, declare both the directory that confines
 all configuration access and the root file relative to that directory:
 
-```
+```sh
 $ ./klipper_estimator \
     --config_klipper_root /home/pi/printer_data/config \
     --config_klipper_file printer.cfg \
@@ -95,19 +97,22 @@ To experiment with settings, use `dump-config` together with
 imported again without losing its provenance:
 
 To dump a config, use e.g.:
-```
-$ ./klipper_estimator --config_moonraker_url http://192.168.0.21 dump-config > config.json
+
+```sh
+./klipper_estimator --config_moonraker_url http://192.168.0.21 \
+    dump-config > config.json
 ```
 
 The config file format is JSON5 and thus allows normal JSON with some
-extensions (see https://json5.org/). Legacy flat `PrinterLimits` JSON5 files
+extensions (see <https://json5.org/>). Legacy flat `PrinterLimits` JSON5 files
 remain supported. A legacy Moonraker cache is migrated explicitly and marked
 as degraded because it contains no Klipper version or resolved-settings
 provenance.
 
 After generating a config, one can use this in other commands like so:
-```
-$ ./klipper_estimator --config_file config.json estimate ...
+
+```sh
+./klipper_estimator --config_file config.json estimate ...
 ```
 
 If Moonraker is unavailable, `--config_moonraker_ignore_error` uses
@@ -130,7 +135,8 @@ that class `lower_bound`.
 
 ### Quirks
 
-Be aware of the following "quirks" when using `klipper_estimator` compared to Klipper itself:
+Be aware of the following "quirks" when using `klipper_estimator` compared to
+Klipper itself:
 
 #### Relative extrusion by default
 
@@ -157,7 +163,7 @@ XYZ independently with `G90`/`G91`.
 If you wish to use _absolute_ extrusion, you must ensure that an `M82` command
 is inserted in your slicer start gcode. E.g.:
 
-```
+```gcode
 PRINT_START
 M82
 ```
@@ -268,7 +274,8 @@ Estimation mode is useful for determining statistics about a print, in order to
 optimize print times. It gives a high level summary.
 
 Basic usage:
-```
+
+```text
 $ ./klipper_estimator [config options] estimate ~/3DBenchy.data
 Sequences:
  Run 0:
@@ -313,7 +320,7 @@ the same condition.
 
 History calibration is opt-in and requires a live Moonraker configuration:
 
-```
+```sh
 ./klipper_estimator \
     --config_moonraker_url http://192.168.0.21 \
     estimate print.gcode --history_calibration
@@ -358,38 +365,46 @@ in in-place, updating time estimations in the file.
 
 When using `klipper_estimator` in `post-process` mode, simply add a
 post-processing script in your slicer like so:
-```
+
+```sh
 /path/to/klipper_estimator --config_moonraker_url http://192.168.0.21 post-process
 ```
+
 Change the path and config options to fit your situation.
 
 Currently the following slicers are supported:
 
-  * PrusaSlicer
-  * SuperSlicer
-  * OrcaSlicer
-  * ideaMaker
-  * Cura
-  * Simplify3D
+* PrusaSlicer
+* SuperSlicer
+* OrcaSlicer
+* ideaMaker
+* Cura
+* Simplify3D
 
-In PrusaSlicer, SuperSlicer, and OrcaSlicer `Post-processing scripts` are set in `Output
-Options` under `Print Settings`:
+In PrusaSlicer, SuperSlicer, and OrcaSlicer `Post-processing scripts` are set
+in `Output Options` under `Print Settings`:
 
-![PrusaSlicer, Orcaslicer, and SuperSlicer Post-processing scripts option](/doc/post_processing_psss.png)
+![Slicer post-processing scripts option][post-processing-screenshot]
+
+[post-processing-screenshot]: /doc/post_processing_psss.png
 
 Note that ideaMaker does not have support for post-processing scripts, and thus
 cannot automatically run `klipper_estimator` on export.
 
 For Cura, using
 [klipper Preprocessor](https://github.com/pedrolamas/klipper-preprocessor) is
-recommended. See their git repository for information on how to set up this tool.
+recommended. See their git repository for information on how to set up this
+tool.
 
 In Simplify3D the relevant estimation command must be added under `Scripts` in
-the `Additional terminal commands for post processing` field. This field is just called
-`Post Processing` in V5.x, and the command should be appended with a [output_filepath].
+the `Additional terminal commands for post processing` field. This field is
+called `Post Processing` in V5.x, and the command should be appended with an
+`[output_filepath]` argument.
 
-```
-/path/to/klipper_estimator --config_moonraker_url http://192.168.0.21 post-process [output_filepath]
+```sh
+/path/to/klipper_estimator \
+    --config_moonraker_url http://192.168.0.21 \
+    post-process [output_filepath]
 ```
 
 ### `dump-moves` mode
@@ -413,7 +428,7 @@ can easily measure it after a print is over.
 To compensate for this, `klipper_estimator` understands the following gcode
 comment(generally syntax followed by some examples):
 
-```
+```gcode
 ; ESTIMATOR_ADD_TIME <duration, seconds> [description]
 ; E.g.:
 ; ESTIMATOR_ADD_TIME 21
@@ -430,13 +445,17 @@ line, will trigger this behaviour. Any whitespace between the `;` and `E`
 characters will however be ignored.
 
 The intended usage of this functionality is for print start macros, when
-executed by the slicer. E.g. in PrusaSlicer, SuperSlicer, or OrcaSlicer, one might set their
-print start gcode like this:
+executed by the slicer. E.g. in PrusaSlicer, SuperSlicer, or OrcaSlicer, one
+might set their print start gcode like this:
 
-```
+<!-- markdownlint-disable MD013 -->
+
+```gcode
 ; ESTIMATOR_ADD_TIME 20 Prime line
 print_start extruder=[first_layer_temperature] bed=[first_layer_bed_temperature]
 ```
+
+<!-- markdownlint-enable MD013 -->
 
 For a fixed macro contract, configure both its duration and the G-code state it
 leaves behind. Contract names are case-insensitive and parameters are not
@@ -511,12 +530,12 @@ or insufficient capability rather than synthesized.
 All Moonraker access, including normal configuration and history code, goes
 through a transport allowlist checked before network I/O. It permits only:
 
-- `GET /server/info`
-- `GET /printer/info`
-- `GET /printer/objects/list`
-- `POST /printer/objects/query` (read-only object selection)
-- `GET /server/history/list`
-- `GET /server/files/gcodes/<validated-history-path>`
+* `GET /server/info`
+* `GET /printer/info`
+* `GET /printer/objects/list`
+* `POST /printer/objects/query` (read-only object selection)
+* `GET /server/history/list`
+* `GET /server/files/gcodes/<validated-history-path>`
 
 Mock-server tests record allowed methods and paths and verify that G-code
 scripts, service restarts, uploads, history deletion, file deletion, and path
@@ -547,17 +566,19 @@ benchmark is documented in `benchmarks/README.md`.
 crates, local development, CI, and release builds use that baseline. Assuming
 Rust 1.98.0 and Git are installed, build `klipper_estimator` by running:
 
+```sh
+git clone https://github.com/ste94pz/klipper_estimator.git
+cd klipper_estimator
+cargo build --release
 ```
-$ git clone https://github.com/ste94pz/klipper_estimator.git
-$ cd klipper_estimator
-$ cargo build --release
-// Resulting binary will be at `target/release/klipper_estimator`(.exe on Windows)
-```
+
+The resulting binary will be at `target/release/klipper_estimator` (`.exe` on
+Windows).
 
 ## Acknowledgements
 
 This project is in no way endorsed by the Klipper project. Please do not direct
 any support requests to the Klipper project.
 
-  * [Klipper](https://www.klipper3d.org/) by [Kevin O'Connor](https://www.patreon.com/koconnor)
-  * [Moonraker](https://github.com/Arksine/moonraker) by Arksine
+* [Klipper](https://www.klipper3d.org/) by [Kevin O'Connor](https://www.patreon.com/koconnor)
+* [Moonraker](https://github.com/Arksine/moonraker) by Arksine

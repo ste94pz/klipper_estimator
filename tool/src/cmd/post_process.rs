@@ -5,7 +5,6 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use regex::Regex;
 
 use lib_klipper::gcode::{
     GCodeCommand, GCodeOperation, GCodeReader, GCodeTraditionalParams, parse_gcode,
@@ -139,23 +138,21 @@ impl GCodeInterceptor for PSSSGCodeInterceptor {
         command: &GCodeCommand,
         result: &PostProcessEstimationResult,
     ) -> Option<GCodeCommand> {
-        lazy_static! {
-            static ref RE_EST_TIME: Regex =
-                Regex::new(r"^ estimated printing time \(.*?\) =").unwrap();
-        }
-
         if let Some(cmd) = self.m73_interceptor.output_process(command, result) {
             return Some(cmd);
         }
 
         if let Some(com) = &command.comment
-            && let Some(c) = RE_EST_TIME.captures(com)
+            && let Some(end) = com
+                .strip_prefix(" estimated printing time (")
+                .and_then(|rest| rest.find(") ="))
         {
+            let prefix_end = " estimated printing time (".len() + end + ") =".len();
             return Some(GCodeCommand {
                 op: GCodeOperation::Nop,
                 comment: Some(format!(
                     "{}{}",
-                    c.get(0).unwrap().as_str(),
+                    &com[..prefix_end],
                     Self::format_dhms(result.total_time)
                 )),
             });
@@ -536,5 +533,26 @@ mod tests {
             .output_process(&parse_gcode(";TIME:999").unwrap(), &result)
             .expect("Cura TIME field should be replaced");
         assert_eq!(output.comment.as_deref(), Some("TIME:43"));
+    }
+
+    #[test]
+    fn prusaslicer_estimated_time_marker_is_rewritten_without_a_regex() {
+        let mut interceptor = PSSSGCodeInterceptor::default();
+        let result = PostProcessEstimationResult {
+            total_time: 3661.0,
+            ..Default::default()
+        };
+
+        let output = interceptor
+            .output_process(
+                &parse_gcode("; estimated printing time (normal mode) = 1s").unwrap(),
+                &result,
+            )
+            .expect("PrusaSlicer estimated-time marker should be replaced");
+
+        assert_eq!(
+            output.comment.as_deref(),
+            Some(" estimated printing time (normal mode) = 1h 1m 1s")
+        );
     }
 }
