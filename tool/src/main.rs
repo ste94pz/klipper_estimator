@@ -11,6 +11,8 @@ mod calibration;
 mod cmd;
 mod config_snapshot;
 mod duration;
+mod moonraker;
+mod moonraker_smoke;
 
 use config_snapshot::{
     ConfigSnapshot, SnapshotAccuracy, SnapshotSelection, SnapshotSource, SnapshotSourceKind,

@@ -482,6 +482,47 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Opt-in read-only Moonraker smoke test
+
+The real-printer integration test is ignored by default, so normal tests remain
+offline. Run it manually only while the target Moonraker instance is available:
+
+```sh
+MOONRAKER_URL=http://printer.local \
+MOONRAKER_API_KEY='optional-api-key' \
+cargo test -p klipper_estimator \
+  moonraker_smoke::tests::real_moonraker_read_only_smoke \
+  -- --ignored --exact --nocapture
+```
+
+`MOONRAKER_API_KEY` is optional. `MOONRAKER_HISTORY_LIMIT` can reduce the
+default limit of 10 recent jobs. Keep the key out of shell history and shared
+logs; the report records methods and paths but never headers or credentials.
+
+The runner reads server and printer version/state, object discovery,
+`configfile.settings`, current toolhead/G-code/extruder and supported optional
+object status, plus recent history metadata. For otherwise suitable completed
+history records it may download the associated G-code to verify the final
+calibration marker. The report includes both snapshot modes, configuration
+fingerprint stability, kinematics backend, history capability, and the complete
+request log. Missing optional objects or usable history are reported as absent
+or insufficient capability rather than synthesized.
+
+All Moonraker access, including normal configuration and history code, goes
+through a transport allowlist checked before network I/O. It permits only:
+
+- `GET /server/info`
+- `GET /printer/info`
+- `GET /printer/objects/list`
+- `POST /printer/objects/query` (read-only object selection)
+- `GET /server/history/list`
+- `GET /server/files/gcodes/<validated-history-path>`
+
+Mock-server tests record allowed methods and paths and verify that G-code
+scripts, service restarts, uploads, history deletion, file deletion, and path
+traversal are rejected before any request is sent. The smoke test never sends
+printer commands, uploads files, restarts services, or changes remote state.
+
 Planner changes must additionally be checked against the pinned Klipper
 reference. Set `KLIPPER_PATH` if the checkout is not available as `klipper/`:
 

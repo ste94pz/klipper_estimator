@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
+use crate::moonraker::{ReadOnlyMoonrakerClient, ReadOnlyMoonrakerError};
+
 pub const CONFIG_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const PINNED_KLIPPER_COMMIT: &str = "f0892d82b0f1c1228454f09eb508eddde2250f4b";
 
@@ -276,12 +278,12 @@ impl ConfigSnapshot {
 
 #[derive(Error, Debug)]
 pub enum SnapshotError {
-    #[error("given URL cannot be a base URL")]
-    UrlCannotBeBase,
     #[error("invalid URL: {0}")]
     UrlParse(#[from] url::ParseError),
     #[error("Moonraker request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    ReadOnlyTransport(#[from] ReadOnlyMoonrakerError),
     #[error("Moonraker did not report required printer object '{0}'")]
     MissingObject(String),
     #[error("Moonraker response is missing required field '{0}'")]
@@ -382,12 +384,17 @@ pub fn fetch_moonraker_snapshot(
     api_key: Option<&str>,
     selection: SnapshotSelection,
 ) -> Result<ConfigSnapshot, SnapshotError> {
-    let client = reqwest::blocking::Client::new();
-    let list_url = endpoint(source_url, &["printer", "objects", "list"])?;
-    let info_url = endpoint(source_url, &["printer", "info"])?;
-    let query_url = endpoint(source_url, &["printer", "objects", "query"])?;
+    let client = ReadOnlyMoonrakerClient::new(source_url, api_key)?;
+    fetch_moonraker_snapshot_with_client(&client, source_url, selection)
+}
 
-    let available: BTreeSet<String> = send_get(&client, list_url, api_key)?
+pub fn fetch_moonraker_snapshot_with_client(
+    client: &ReadOnlyMoonrakerClient,
+    source_url: &str,
+    selection: SnapshotSelection,
+) -> Result<ConfigSnapshot, SnapshotError> {
+    let available: BTreeSet<String> = client
+        .get(&["printer", "objects", "list"])?
         .json::<MoonrakerRoot<ObjectList>>()?
         .result
         .objects
@@ -401,14 +408,16 @@ pub fn fetch_moonraker_snapshot(
 
     let objects = requested_objects(&available);
 
-    let request = object_query_request(&client, query_url, api_key, &objects)?;
     let status = client
-        .execute(request)?
-        .error_for_status()?
+        .post_json(
+            &["printer", "objects", "query"],
+            &json!({ "objects": objects }),
+        )?
         .json::<MoonrakerRoot<ObjectQuery>>()?
         .result
         .status;
-    let info = send_get(&client, info_url, api_key)?
+    let info = client
+        .get(&["printer", "info"])?
         .json::<MoonrakerRoot<PrinterInfo>>()?
         .result;
 
@@ -436,43 +445,6 @@ fn requested_objects(available: &BTreeSet<String>) -> BTreeMap<String, Option<Ve
         }
     }
     objects
-}
-
-fn object_query_request(
-    client: &reqwest::blocking::Client,
-    query_url: Url,
-    api_key: Option<&str>,
-    objects: &BTreeMap<String, Option<Vec<String>>>,
-) -> Result<reqwest::blocking::Request, SnapshotError> {
-    let mut request = client.post(query_url).json(&json!({ "objects": objects }));
-    if let Some(api_key) = api_key {
-        request = request.header("X-Api-Key", api_key);
-    }
-    Ok(request.build()?)
-}
-
-fn send_get(
-    client: &reqwest::blocking::Client,
-    url: Url,
-    api_key: Option<&str>,
-) -> Result<reqwest::blocking::Response, reqwest::Error> {
-    let mut request = client.get(url);
-    if let Some(api_key) = api_key {
-        request = request.header("X-Api-Key", api_key);
-    }
-    request.send()?.error_for_status()
-}
-
-fn endpoint(source_url: &str, segments: &[&str]) -> Result<Url, SnapshotError> {
-    let mut url = Url::parse(source_url)?;
-    url.set_query(None);
-    let mut path = url
-        .path_segments_mut()
-        .map_err(|_| SnapshotError::UrlCannotBeBase)?;
-    path.pop_if_empty();
-    path.extend(segments);
-    drop(path);
-    Ok(url)
 }
 
 fn snapshot_from_status(
@@ -2653,6 +2625,13 @@ pub fn map_auth_error(error: &SnapshotError) -> Option<String> {
                 "access denied (you may need --config_moonraker_api_key): {request_error}"
             ))
         }
+        SnapshotError::ReadOnlyTransport(transport_error)
+            if transport_error.status() == Some(StatusCode::UNAUTHORIZED) =>
+        {
+            Some(format!(
+                "access denied (you may need --config_moonraker_api_key): {transport_error}"
+            ))
+        }
         _ => None,
     }
 }
@@ -3277,7 +3256,7 @@ lower_arm_length: 320
     }
 
     #[test]
-    fn discovery_builds_a_post_object_query() {
+    fn discovery_selects_only_available_optional_objects() {
         let available = [
             "configfile",
             "toolhead",
@@ -3289,20 +3268,9 @@ lower_arm_length: 320
         .map(str::to_string)
         .collect();
         let objects = requested_objects(&available);
-        let request = object_query_request(
-            &reqwest::blocking::Client::new(),
-            Url::parse("http://printer.local/printer/objects/query").unwrap(),
-            Some("secret"),
-            &objects,
-        )
-        .unwrap();
 
-        assert_eq!(request.method(), reqwest::Method::POST);
-        assert_eq!(request.headers()["X-Api-Key"], "secret");
-        let body: Value =
-            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
-        assert!(body["objects"]["extruder1"].is_null());
-        assert!(body["objects"].get("firmware_retraction").is_none());
+        assert!(objects["extruder1"].is_none());
+        assert!(!objects.contains_key("firmware_retraction"));
     }
 
     #[test]

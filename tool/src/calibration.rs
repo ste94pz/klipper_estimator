@@ -2,12 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use url::Url;
 
 use crate::duration::DurationEstimate;
+use crate::moonraker::ReadOnlyMoonrakerClient;
 
 pub const CALIBRATION_MARKER_PREFIX: &str = "; klipper_estimator calibration: ";
 const CALIBRATION_MARKER_SCHEMA_VERSION: u32 = 1;
@@ -179,10 +178,29 @@ pub fn fetch_history_calibration(
     max_age_seconds: u64,
     min_samples: usize,
 ) -> CalibrationReport {
+    let client = match ReadOnlyMoonrakerClient::new(source_url, api_key) {
+        Ok(client) => client,
+        Err(error) => return CalibrationReport::unavailable(error.to_string()),
+    };
+    fetch_history_calibration_with_client(
+        &client,
+        configuration_fingerprint,
+        limit,
+        max_age_seconds,
+        min_samples,
+    )
+}
+
+pub fn fetch_history_calibration_with_client(
+    client: &ReadOnlyMoonrakerClient,
+    configuration_fingerprint: &str,
+    limit: usize,
+    max_age_seconds: u64,
+    min_samples: usize,
+) -> CalibrationReport {
     let now = now_unix_seconds();
     match fetch_history_calibration_inner(
-        source_url,
-        api_key,
+        client,
         configuration_fingerprint,
         limit,
         max_age_seconds,
@@ -195,21 +213,19 @@ pub fn fetch_history_calibration(
 }
 
 fn fetch_history_calibration_inner(
-    source_url: &str,
-    api_key: Option<&str>,
+    client: &ReadOnlyMoonrakerClient,
     configuration_fingerprint: &str,
     limit: usize,
     max_age_seconds: u64,
     min_samples: usize,
     now: u64,
 ) -> Result<CalibrationReport, String> {
-    let client = Client::new();
-    let mut history_url = endpoint(source_url, &["server", "history", "list"])?;
-    history_url
-        .query_pairs_mut()
-        .append_pair("limit", &limit.to_string())
-        .append_pair("order", "desc");
-    let response = send_get(&client, history_url, api_key)?
+    let response = client
+        .get_with_query(
+            &["server", "history", "list"],
+            &[("limit", limit.to_string()), ("order", "desc".into())],
+        )
+        .map_err(|error| error.to_string())?
         .json::<MoonrakerRoot<HistoryList>>()
         .map_err(|error| format!("could not parse Moonraker history: {error}"))?;
 
@@ -219,7 +235,7 @@ fn fetch_history_calibration_inner(
         max_age_seconds,
         min_samples,
         now,
-        |job| fetch_marker(&client, source_url, api_key, &job.filename),
+        |job| fetch_marker(client, &job.filename),
     ))
 }
 
@@ -403,9 +419,7 @@ fn quantile(sorted: &[f64], quantile: f64) -> f64 {
 }
 
 fn fetch_marker(
-    client: &Client,
-    source_url: &str,
-    api_key: Option<&str>,
+    client: &ReadOnlyMoonrakerClient,
     filename: &str,
 ) -> Result<CalibrationMarker, String> {
     let segments = filename
@@ -421,8 +435,9 @@ fn fetch_marker(
     }
     let mut all_segments = vec!["server", "files", "gcodes"];
     all_segments.extend(segments);
-    let url = endpoint(source_url, &all_segments)?;
-    let bytes = send_get(client, url, api_key)?
+    let bytes = client
+        .get(&all_segments)
+        .map_err(|error| error.to_string())?
         .bytes()
         .map_err(|error| format!("could not read history G-code: {error}"))?;
     parse_verified_marker(&bytes)
@@ -451,34 +466,6 @@ fn parse_verified_marker(bytes: &[u8]) -> Result<CalibrationMarker, String> {
         return Err("calibration marker G-code fingerprint mismatch".into());
     }
     Ok(marker)
-}
-
-fn send_get(
-    client: &Client,
-    url: Url,
-    api_key: Option<&str>,
-) -> Result<reqwest::blocking::Response, String> {
-    let mut request = client.get(url);
-    if let Some(api_key) = api_key {
-        request = request.header("X-Api-Key", api_key);
-    }
-    request
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|error| format!("Moonraker history request failed: {error}"))
-}
-
-fn endpoint(source_url: &str, segments: &[&str]) -> Result<Url, String> {
-    let mut url =
-        Url::parse(source_url).map_err(|error| format!("invalid Moonraker URL: {error}"))?;
-    url.set_query(None);
-    let mut path = url
-        .path_segments_mut()
-        .map_err(|_| "Moonraker URL cannot be a base URL")?;
-    path.pop_if_empty();
-    path.extend(segments);
-    drop(path);
-    Ok(url)
 }
 
 pub fn fingerprint_reader(mut reader: impl Read) -> std::io::Result<String> {
