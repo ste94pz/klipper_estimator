@@ -43,6 +43,10 @@ available, courtesy of Wilhelm Schuster. Thanks!
 
 Basic usage info can be found by running `klipper_estimator` with no arguments.
 
+Input and configuration failures are reported on stderr with a non-zero exit
+status. Missing or unreadable G-code files and malformed G-code include the
+relevant path or line number; they do not produce a Rust panic or backtrace.
+
 ### Configuration
 
 In order to provide accurate times, `klipper_estimator` needs printer settings
@@ -196,6 +200,11 @@ Commands that make Klipper wait for or flush queued motion form lookahead
 boundaries in the estimate. This includes `M400`, `G4`, homing, temperature
 waits, and the estimator's existing indeterminate wait operations. Motion on
 the two sides of a boundary therefore starts or ends at rest as appropriate.
+
+A non-positive or non-finite requested move speed is retained as a structured
+`invalid_move_speed` diagnostic instead of aborting the estimator. The previous
+valid speed is kept only to provide an explicit lower-bound result; Klipper
+would reject that move speed.
 
 #### Kinematics
 

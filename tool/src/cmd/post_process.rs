@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use clap::Parser;
 
 use lib_klipper::gcode::{
@@ -351,9 +352,9 @@ struct EstimateRunner {
 }
 
 impl EstimateRunner {
-    fn run<T: BufRead>(&mut self, rdr: &mut GCodeReader<T>) {
+    fn run<T: BufRead>(&mut self, rdr: &mut GCodeReader<T>) -> anyhow::Result<()> {
         for (n, cmd) in rdr.enumerate() {
-            let cmd = cmd.expect("gcode read");
+            let cmd = cmd.with_context(|| format!("failed to read G-code at line {}", n + 1))?;
 
             // If we don't have a slicer figured out yet, and this is a comment, try
             if cmd.op.is_nop()
@@ -385,6 +386,7 @@ impl EstimateRunner {
                 omitted.command, omitted.category, omitted.reason
             );
         }
+        Ok(())
     }
 
     fn flush(&mut self) {
@@ -405,46 +407,76 @@ impl EstimateRunner {
 }
 
 impl PostProcessCmd {
-    fn estimate(&self, opts: &Opts) -> PostProcessState {
-        let src = File::open(&self.filename).expect("opening gcode file failed");
+    fn estimate(&self, opts: &Opts) -> anyhow::Result<PostProcessState> {
+        let src = File::open(&self.filename)
+            .with_context(|| format!("failed to open G-code file '{}'", self.filename.display()))?;
         let mut rdr = GCodeReader::new(BufReader::new(src));
 
         let mut runner = EstimateRunner {
             state: PostProcessState::default(),
-            planner: opts.make_planner(),
+            planner: opts.make_planner()?,
             buffer: VecDeque::new(),
         };
-        runner.run(&mut rdr);
-        runner.state
+        runner.run(&mut rdr).with_context(|| {
+            format!(
+                "failed to estimate G-code file '{}'",
+                self.filename.display()
+            )
+        })?;
+        Ok(runner.state)
     }
 
-    fn apply_changes(&self, mut state: PostProcessState, configuration_fingerprint: &str) {
-        let src = File::open(&self.filename).expect("opening gcode file failed");
+    fn apply_changes(
+        &self,
+        mut state: PostProcessState,
+        configuration_fingerprint: &str,
+    ) -> anyhow::Result<()> {
+        let src = File::open(&self.filename).with_context(|| {
+            format!(
+                "failed to reopen G-code file '{}' for post-processing",
+                self.filename.display()
+            )
+        })?;
         let rdr = BufReader::new(src);
 
         let mut dst_name = Into::<OsString>::into(".estimate.");
-        dst_name.push(self.filename.file_name().expect("invalid file name"));
+        dst_name.push(
+            self.filename
+                .file_name()
+                .context("G-code path has no file name")?,
+        );
         let dst_path = self
             .filename
             .parent()
-            .unwrap_or_else(|| Path::new("/"))
+            .unwrap_or_else(|| Path::new("."))
             .join(dst_name);
-        let dst = File::create(&dst_path).expect("creating target gcode file failed");
+        let dst = File::create(&dst_path).with_context(|| {
+            format!(
+                "failed to create temporary post-processing file '{}'",
+                dst_path.display()
+            )
+        })?;
         let mut wr = BufWriter::new(dst);
 
-        for line in rdr.lines() {
-            let line = line.expect("IO error");
+        for (line_number, line) in rdr.lines().enumerate() {
+            let line = line.with_context(|| {
+                format!(
+                    "failed to reread G-code file '{}' at line {}",
+                    self.filename.display(),
+                    line_number + 1
+                )
+            })?;
             if line.starts_with(CALIBRATION_MARKER_PREFIX) {
                 continue;
             }
             if let Ok(cmd) = parse_gcode(&line) {
                 if let Some(cmd) = state.gcode_interceptor.output_process(&cmd, &state.result) {
-                    writeln!(wr, "{}", cmd).expect("IO error");
+                    writeln!(wr, "{}", cmd)?;
                 } else {
-                    writeln!(wr, "{}", line).expect("IO error");
+                    writeln!(wr, "{}", line)?;
                 }
             } else {
-                writeln!(wr, "{}", line).expect("IO error");
+                writeln!(wr, "{}", line)?;
             }
         }
 
@@ -457,16 +489,18 @@ impl PostProcessCmd {
             } else {
                 "no slicer detected".into()
             }
-        )
-        .expect("IO error");
+        )?;
 
         // The marker hashes every preceding byte and is deliberately excluded from its own hash.
-        wr.flush().expect("IO error");
+        wr.flush()?;
         drop(wr);
-        let gcode_fingerprint = fingerprint_reader(
-            File::open(&dst_path).expect("opening processed G-code for hashing failed"),
-        )
-        .expect("hashing processed G-code failed");
+        let gcode_fingerprint = fingerprint_reader(File::open(&dst_path).with_context(|| {
+            format!(
+                "failed to open processed G-code '{}' for hashing",
+                dst_path.display()
+            )
+        })?)
+        .context("failed to hash processed G-code")?;
         let marker = CalibrationMarker::new(
             configuration_fingerprint.into(),
             gcode_fingerprint,
@@ -475,15 +509,26 @@ impl PostProcessCmd {
         let mut dst = OpenOptions::new()
             .append(true)
             .open(&dst_path)
-            .expect("opening processed G-code for calibration marker failed");
-        writeln!(dst, "{}", marker.to_comment()).expect("writing calibration marker failed");
-        std::fs::rename(&dst_path, &self.filename).expect("rename failed");
+            .with_context(|| {
+                format!(
+                    "failed to open processed G-code '{}' for calibration marker",
+                    dst_path.display()
+                )
+            })?;
+        writeln!(dst, "{}", marker.to_comment())?;
+        std::fs::rename(&dst_path, &self.filename).with_context(|| {
+            format!(
+                "failed to replace '{}' with processed G-code",
+                self.filename.display()
+            )
+        })?;
+        Ok(())
     }
 
-    pub fn run(&self, opts: &Opts) {
-        let state = self.estimate(opts);
-        let configuration_fingerprint = opts.config_snapshot().fingerprint.clone();
-        self.apply_changes(state, &configuration_fingerprint);
+    pub fn run(&self, opts: &Opts) -> anyhow::Result<()> {
+        let state = self.estimate(opts)?;
+        let configuration_fingerprint = opts.config_snapshot()?.fingerprint.clone();
+        self.apply_changes(state, &configuration_fingerprint)
     }
 }
 
@@ -503,7 +548,7 @@ mod tests {
             buffer: VecDeque::new(),
         };
 
-        runner.run(&mut reader);
+        runner.run(&mut reader).unwrap();
 
         assert_eq!(
             runner.state.result.total_time,

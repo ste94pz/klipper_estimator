@@ -6,8 +6,8 @@ use crate::Opts;
 pub struct DumpConfigCmd;
 
 impl DumpConfigCmd {
-    pub fn run(&self, opts: &Opts) {
-        serde_json::to_writer_pretty(std::io::stdout(), opts.config_snapshot())
-            .expect("configuration snapshot serialization failed");
+    pub fn run(&self, opts: &Opts) -> anyhow::Result<()> {
+        serde_json::to_writer_pretty(std::io::stdout(), opts.config_snapshot()?)?;
+        Ok(())
     }
 }

@@ -35,7 +35,12 @@ impl ArcState {
         let mut e_base = toolhead_state.position.w;
         let e_per_move = args.e.map_or(0.0, |e| (e - e_base) / (segments as f64));
 
-        toolhead_state.set_speed(args.velocity);
+        if !toolhead_state.set_speed(args.velocity) {
+            op_sequence.add_diagnostic(crate::planner::PlannerDiagnostic::invalid_move_speed(
+                "G2/G3",
+                args.velocity,
+            ));
+        }
 
         for segment in arc {
             e_base += e_per_move;

@@ -70,26 +70,20 @@ impl Opts {
             .as_deref()
             .map(|url| (url, self.config_moonraker_api_key.as_deref()))
     }
-    fn printer_limits(&self) -> &PrinterLimits {
-        &self.config_snapshot().limits
+    fn printer_limits(&self) -> anyhow::Result<&PrinterLimits> {
+        Ok(&self.config_snapshot()?.limits)
     }
 
-    fn config_snapshot(&self) -> &ConfigSnapshot {
-        match self.config.get() {
-            Some(snapshot) => snapshot,
-            None => match self.load_config() {
-                Ok(snapshot) => {
-                    let _ = self.config.set(snapshot);
-                    self.config
-                        .get()
-                        .expect("configuration was just initialized")
-                }
-                Err(e) => {
-                    eprintln!("Failed to load printer configuration: {}", e);
-                    std::process::exit(1);
-                }
-            },
+    fn config_snapshot(&self) -> anyhow::Result<&ConfigSnapshot> {
+        if self.config.get().is_none() {
+            let snapshot = self
+                .load_config()
+                .context("failed to load printer configuration")?;
+            let _ = self.config.set(snapshot);
         }
+        self.config
+            .get()
+            .context("printer configuration could not be initialized")
     }
 
     fn opt_parse(s: &str) -> anyhow::Result<(&str, Value)> {
@@ -241,8 +235,8 @@ impl Opts {
         Ok(snapshot)
     }
 
-    fn make_planner(&self) -> Planner {
-        Planner::from_limits(self.printer_limits().clone())
+    fn make_planner(&self) -> anyhow::Result<Planner> {
+        Ok(Planner::from_limits(self.printer_limits()?.clone()))
     }
 }
 
@@ -255,7 +249,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    fn run(&self, opts: &Opts) {
+    fn run(&self, opts: &Opts) -> anyhow::Result<()> {
         match self {
             Self::Estimate(i) => i.run(opts),
             Self::DumpMoves(i) => i.run(opts),
@@ -265,7 +259,14 @@ impl SubCommand {
     }
 }
 
-fn main() {
+fn try_main() -> anyhow::Result<()> {
     let opts = Opts::parse();
-    opts.cmd.run(&opts);
+    opts.cmd.run(&opts)
+}
+
+fn main() {
+    if let Err(error) = try_main() {
+        eprintln!("Error: {error:#}");
+        std::process::exit(1);
+    }
 }

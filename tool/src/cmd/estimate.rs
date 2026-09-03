@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 
+use anyhow::Context;
 use lib_klipper::gcode::GCodeReader;
 use lib_klipper::glam::{DVec2, Vec4Swizzles};
 use lib_klipper::planner::{Delay, Planner, PlannerDiagnostic, PlanningMove, PlanningOperation};
@@ -295,15 +296,18 @@ impl EstimationState {
 }
 
 impl EstimateCmd {
-    pub fn run(&self, opts: &Opts) {
+    pub fn run(&self, opts: &Opts) -> anyhow::Result<()> {
         let src: Box<dyn std::io::Read> = match self.input.as_str() {
             "-" => Box::new(std::io::stdin()),
-            filename => Box::new(File::open(filename).expect("opening gcode file failed")),
+            filename => Box::new(
+                File::open(filename)
+                    .with_context(|| format!("failed to open G-code file '{filename}'"))?,
+            ),
         };
         let rdr = GCodeReader::new(BufReader::new(src));
 
-        let snapshot = opts.config_snapshot();
-        let mut planner = opts.make_planner();
+        let snapshot = opts.config_snapshot()?;
+        let mut planner = opts.make_planner()?;
         let mut state = EstimationState {
             metadata: EstimationMetadata::from_snapshot(snapshot),
             configuration: Some(snapshot.summary()),
@@ -311,7 +315,13 @@ impl EstimateCmd {
         };
 
         for (i, cmd) in rdr.enumerate() {
-            let cmd = cmd.expect("gcode read");
+            let cmd = cmd.with_context(|| {
+                format!(
+                    "failed to read G-code from '{}' at line {}",
+                    self.input,
+                    i + 1
+                )
+            })?;
             planner.process_cmd(&cmd);
 
             if i % 1000 == 0 {
@@ -581,10 +591,13 @@ impl EstimateCmd {
                 }
             }
             OutputFormat::Json => {
-                serde_json::to_writer_pretty(std::io::stdout(), &state)
-                    .expect("Serialization error");
+                let stdout = std::io::stdout();
+                let mut output = stdout.lock();
+                serde_json::to_writer_pretty(&mut output, &state)?;
+                writeln!(output)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -670,14 +683,17 @@ impl DumpMovesState {
 }
 
 impl DumpMovesCmd {
-    pub fn run(&self, opts: &Opts) {
+    pub fn run(&self, opts: &Opts) -> anyhow::Result<()> {
         let src: Box<dyn std::io::Read> = match self.input.as_str() {
             "-" => Box::new(std::io::stdin()),
-            filename => Box::new(File::open(filename).expect("opening gcode file failed")),
+            filename => Box::new(
+                File::open(filename)
+                    .with_context(|| format!("failed to open G-code file '{filename}'"))?,
+            ),
         };
         let rdr = GCodeReader::new(BufReader::new(src));
 
-        let mut planner = opts.make_planner();
+        let mut planner = opts.make_planner()?;
         let mut state = DumpMovesState {
             move_idx: 0,
             ctime: 0.25,
@@ -685,7 +701,13 @@ impl DumpMovesCmd {
         };
 
         for (i, cmd) in rdr.enumerate() {
-            let cmd = cmd.expect("gcode read");
+            let cmd = cmd.with_context(|| {
+                format!(
+                    "failed to read G-code from '{}' at line {}",
+                    self.input,
+                    i + 1
+                )
+            })?;
             planner.process_cmd(&cmd);
 
             if i % 1000 == 0 {
@@ -697,6 +719,7 @@ impl DumpMovesCmd {
         for diagnostic in planner.diagnostics() {
             eprintln!("{}: {}", diagnostic.command, diagnostic.message);
         }
+        Ok(())
     }
 }
 

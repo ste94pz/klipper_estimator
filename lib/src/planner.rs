@@ -101,8 +101,11 @@ impl Planner {
             }
             self.operations.add_delay(m);
         } else if let GCodeOperation::Move { x, y, z, e, f } = &cmd.op {
-            if let Some(v) = f {
-                self.toolhead_state.set_gcode_speed(*v);
+            if let Some(v) = f
+                && !self.toolhead_state.set_gcode_speed(*v)
+            {
+                self.operations
+                    .add_diagnostic(PlannerDiagnostic::invalid_move_speed("G1", *v));
             }
 
             let move_kind = self.kind_tracker.kind_from_comment(&cmd.comment);
@@ -698,6 +701,7 @@ pub enum PlannerDiagnosticCode {
     ExtrudeWithoutExtruder,
     UnknownDuration,
     InvalidDurationContract,
+    InvalidMoveSpeed,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -750,6 +754,16 @@ impl PlannerDiagnostic {
             command: command.to_ascii_uppercase(),
             message: "command contract duration must be a finite non-negative number; duration was omitted"
                 .into(),
+        }
+    }
+
+    pub(crate) fn invalid_move_speed(command: &str, speed: f64) -> Self {
+        Self {
+            code: PlannerDiagnosticCode::InvalidMoveSpeed,
+            command: command.to_ascii_uppercase(),
+            message: format!(
+                "Klipper would reject the non-positive or non-finite move speed {speed}; the previous valid speed was retained"
+            ),
         }
     }
 
@@ -1163,7 +1177,7 @@ impl OperationSequence {
         }
     }
 
-    fn add_diagnostic(&mut self, diagnostic: PlannerDiagnostic) {
+    pub(crate) fn add_diagnostic(&mut self, diagnostic: PlannerDiagnostic) {
         if !self.diagnostics.contains(&diagnostic) {
             self.diagnostics.push(diagnostic);
         }
@@ -1784,15 +1798,16 @@ impl ToolheadState {
         pm
     }
 
-    pub fn set_speed(&mut self, v: f64) {
-        if v <= 0.0 {
-            panic!("Requested toolhead velocity {} <= 0", v);
+    pub fn set_speed(&mut self, v: f64) -> bool {
+        if !v.is_finite() || v <= 0.0 {
+            return false;
         }
-        self.velocity = v
+        self.velocity = v;
+        true
     }
 
-    pub fn set_gcode_speed(&mut self, feedrate: f64) {
-        self.set_speed(feedrate * self.speed_factor);
+    pub fn set_gcode_speed(&mut self, feedrate: f64) -> bool {
+        self.set_speed(feedrate * self.speed_factor)
     }
 
     pub fn gcode_position(&self) -> Vec4 {
@@ -1912,7 +1927,7 @@ impl ToolheadState {
     ) -> PlanningMove {
         let previous_velocity = self.velocity;
         if let Some(velocity) = requested_velocity {
-            self.set_speed(velocity);
+            let _ = self.set_speed(velocity);
         }
         let planning_move = PlanningMove::new(self.position, new_position, self);
         self.position = new_position;
